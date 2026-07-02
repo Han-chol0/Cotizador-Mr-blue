@@ -119,6 +119,7 @@ function mapClickUpToCot(raw) {
     tipo_barniz:       toStr(raw.tipo_barniz)       || "",
     hotstamping_color: toStr(raw.hotstamping_color) || "",
     // ── Meta ───────────────────────────────────────────────────────────────
+    folio:             toStr(raw.folio)              || "",
     _from_clickup:     true,
     _clickup_task_id:  toStr(raw.task_id)           || null,
   };
@@ -1501,6 +1502,7 @@ function EnvioSolicitud({ calcData, cotizacion }) {
           </div>
           {cotizacion?.nombre_proyecto && (
             <div style={{ fontSize: 11, color: C.muted, textAlign: "right" }}>
+              {cotizacion.folio && <span style={{ background: C.cyan, color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 10, fontWeight: 700, marginRight: 5 }}>{cotizacion.folio}</span>}
               <span style={{ fontWeight: 700, color: C.navy }}>{cotizacion.nombre_proyecto}</span>
               {cotizacion.contacto ? " · " + cotizacion.contacto : ""}
             </div>
@@ -1668,6 +1670,7 @@ const emptyCotizacion = () => ({
   correo_contacto: "hola@lelab.ink",
   fecha_respuesta: "",
   direccion: DIRECCION_ENTREGA,
+  folio: "",
   prioridad: "Normal",
   nombre_proyecto: "",
   cantidad: "",
@@ -1822,9 +1825,10 @@ function SolicitudCotizacion({ onGuardar }) {
       <div style={{ background: C.navy, borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 15 }}>Solicitud de Cotización Interno</div>
-          {cot.cot_id && cot.version && (
+          {(cot.folio || (cot.cot_id && cot.version)) && (
             <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>
-              ID: {cot.cot_id.slice(0,8)}… · Versión {cot.version}
+              {cot.folio && <span style={{ background: C.cyan, color: "#fff", borderRadius: 10, padding: "1px 8px", fontSize: 10, fontWeight: 700, marginRight: 6 }}>{cot.folio}</span>}
+              {cot.version && <span>v{cot.version}</span>}
               {cot.ts_display ? " · " + cot.ts_display : ""}
             </div>
           )}
@@ -1866,6 +1870,11 @@ function SolicitudCotizacion({ onGuardar }) {
           <Field label="Nombre del proyecto / cotización" required>
             <input value={cot.nombre_proyecto} onChange={e => set("nombre_proyecto", e.target.value)}
               placeholder="¿Cómo se llama el proyecto?" style={inputStyle} />
+          </Field>
+          <Field label="Folio">
+            <input value={cot.folio || ""} onChange={e => set("folio", e.target.value)}
+              placeholder="Ej: MRB-2026-028 (se asigna automático desde ClickUp)"
+              style={{ ...inputStyle, color: cot.folio ? C.cyan : C.muted, fontWeight: cot.folio ? 700 : 400 }} />
           </Field>
           <Field label="Cantidad solicitada (pz)" required>
             <input type="number" value={cot.cantidad} onChange={e => set("cantidad", e.target.value)}
@@ -2200,7 +2209,9 @@ export default function App() {
           <div>
             <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 16 }}>Mr. Blue · Cotizador Offset</div>
             <div style={{ fontSize: 11, color: "#8BBDD6" }}>
-              {cotizacion?.nombre_proyecto || "Nueva cotización"}
+              {cotizacion?.folio
+              ? cotizacion.folio + " · " + (cotizacion?.nombre_proyecto || "Nueva cotización")
+              : cotizacion?.nombre_proyecto || "Nueva cotización"}
             </div>
           </div>
         </div>
