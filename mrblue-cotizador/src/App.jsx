@@ -1663,15 +1663,56 @@ function SolicitudCotizacion({ onGuardar }) {
     return saved ? JSON.parse(saved) : emptyCotizacion();
   });
   const [guardado, setGuardado] = useState(false);
+  const [showHistorial, setShowHistorial] = useState(false);
 
   const set = (field, val) => setCot(prev => ({ ...prev, [field]: val }));
   const setAcabado = (key, val) => setCot(prev => ({ ...prev, acabados: { ...prev.acabados, [key]: val } }));
 
+  // ── Guardar versión en historial ────────────────────────────────────────────
   const guardar = () => {
-    localStorage.setItem("mrblue_cot_activa", JSON.stringify(cot));
-    onGuardar(cot);
+    const now = new Date().toISOString();
+    const historial = JSON.parse(localStorage.getItem("mrblue_historial") || "[]");
+
+    // Si ya existe una entrada con este cot_id, es una nueva versión
+    const cot_id = cot.cot_id || crypto.randomUUID();
+    const version = historial.filter(h => h.cot_id === cot_id).length + 1;
+
+    const entrada = {
+      ...cot,
+      cot_id,
+      version,
+      timestamp: now,
+      ts_display: new Date(now).toLocaleString("es-MX"),
+    };
+
+    // Guardar en historial (máx 200 entradas)
+    historial.unshift(entrada);
+    if (historial.length > 200) historial.splice(200);
+    localStorage.setItem("mrblue_historial", JSON.stringify(historial));
+
+    // Actualizar cotización activa con cot_id
+    const cotActiva = { ...cot, cot_id };
+    setCot(cotActiva);
+    localStorage.setItem("mrblue_cot_activa", JSON.stringify(cotActiva));
+
+    onGuardar(cotActiva);
     setGuardado(true);
-    setTimeout(() => setGuardado(false), 2000);
+    setTimeout(() => setGuardado(false), 2500);
+  };
+
+  // ── Cargar desde historial ──────────────────────────────────────────────────
+  const cargarVersion = (entrada) => {
+    setCot(entrada);
+    localStorage.setItem("mrblue_cot_activa", JSON.stringify(entrada));
+    setShowHistorial(false);
+  };
+
+  // ── Duplicar como nueva cotización ─────────────────────────────────────────
+  const duplicar = (entrada) => {
+    const nueva = { ...entrada, cot_id: crypto.randomUUID(), version: undefined, timestamp: undefined, ts_display: undefined };
+    setCot(nueva);
+    localStorage.setItem("mrblue_cot_activa", JSON.stringify(nueva));
+    setShowHistorial(false);
   };
 
   const limpiar = () => {
@@ -1682,18 +1723,42 @@ function SolicitudCotizacion({ onGuardar }) {
 
   const selectStyle = { ...inputStyle, appearance: "none" };
 
+  // ── Historial panel ─────────────────────────────────────────────────────────
+  if (showHistorial) {
+    return <HistorialCotizaciones
+      onCargar={cargarVersion}
+      onDuplicar={duplicar}
+      onVolver={() => setShowHistorial(false)}
+    />;
+  }
+
   return (
     <div>
       {/* Header */}
       <div style={{ background: C.navy, borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 15 }}>Solicitud de Cotización Interno</div>
-          <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>Completa los datos antes de calcular pliegos y enviar a proveedores</div>
+          {cot.cot_id && cot.version && (
+            <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>
+              ID: {cot.cot_id.slice(0,8)}… · Versión {cot.version}
+              {cot.ts_display ? " · " + cot.ts_display : ""}
+            </div>
+          )}
+          {!cot.cot_id && (
+            <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>Nueva cotización — sin guardar</div>
+          )}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={limpiar} style={{ background: "none", border: "1.5px solid #8BBDD6", color: "#8BBDD6", borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Nueva</button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => setShowHistorial(true)}
+            style={{ background: "none", border: "1.5px solid #8BBDD6", color: "#8BBDD6", borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            📂 Historial
+          </button>
+          <button onClick={limpiar}
+            style={{ background: "none", border: "1.5px solid #8BBDD6", color: "#8BBDD6", borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            Nueva
+          </button>
           <button onClick={guardar} style={btn(guardado ? C.green : C.cyan)}>
-            {guardado ? "✓ Guardado" : "Guardar y continuar →"}
+            {guardado ? "✓ Versión guardada" : "Guardar versión →"}
           </button>
         </div>
       </div>
@@ -1757,11 +1822,11 @@ function SolicitudCotizacion({ onGuardar }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
             <Field label="Tamaño extendido" required>
               <input value={cot.tamano_extendido} onChange={e => set("tamano_extendido", e.target.value)}
-                placeholder="¿Tamaño extendido de tu producto?" style={inputStyle} />
+                placeholder="Ej: 21.7×29.5 cm" style={inputStyle} />
             </Field>
             <Field label="Tamaño final" required>
               <input value={cot.tamano_final} onChange={e => set("tamano_final", e.target.value)}
-                placeholder="¿Tamaño final de tu producto?" style={inputStyle} />
+                placeholder="Ej: 21×29 cm" style={inputStyle} />
             </Field>
           </div>
           <Field label="Número de tintas" required>
@@ -1800,8 +1865,6 @@ function SolicitudCotizacion({ onGuardar }) {
             <CheckRow key={a.key} checked={!!cot.acabados[a.key]} onChange={v => setAcabado(a.key, v)} label={a.label} />
           ))}
         </div>
-
-        {/* Laminado */}
         <div style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
           <CheckRow checked={cot.laminado} onChange={v => set("laminado", v)} label="Laminado" />
           {cot.laminado && (
@@ -1821,8 +1884,6 @@ function SolicitudCotizacion({ onGuardar }) {
             </div>
           )}
         </div>
-
-        {/* Barniz UV */}
         <div style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
           <CheckRow checked={cot.barniz_uv} onChange={v => set("barniz_uv", v)} label="Barniz U.V." />
           {cot.barniz_uv && (
@@ -1836,8 +1897,6 @@ function SolicitudCotizacion({ onGuardar }) {
             </div>
           )}
         </div>
-
-        {/* Hot Stamping color foil */}
         {cot.acabados.hotstamping && (
           <div style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
             <Field label="Color Foil (Hot Stamping)">
@@ -1865,13 +1924,154 @@ function SolicitudCotizacion({ onGuardar }) {
         </div>
       </div>
 
-      {/* Botón guardar */}
       <button onClick={guardar} style={{ ...btn(guardado ? C.green : C.cyan, true), marginBottom: 8 }}>
-        {guardado ? "✓ Cotización guardada — continúa en Pliegos" : "Guardar cotización y continuar →"}
+        {guardado ? "✓ Versión guardada — continúa en Pliegos" : "Guardar versión y continuar →"}
       </button>
       <div style={{ fontSize: 11, color: C.muted, textAlign: "center", marginBottom: 16 }}>
-        Los datos se conservan mientras trabajas. Presiona "Nueva" para empezar una cotización diferente.
+        Cada guardado crea una nueva versión inmutable. Accede al historial con 📂 para comparar versiones anteriores.
       </div>
+    </div>
+  );
+}
+
+// ── Historial de cotizaciones ─────────────────────────────────────────────────
+function HistorialCotizaciones({ onCargar, onDuplicar, onVolver }) {
+  const [historial, setHistorial] = useState([]);
+  const [busqueda, setBusqueda]   = useState("");
+  const [expandido, setExpandido] = useState(null);
+
+  useEffect(() => {
+    const h = JSON.parse(localStorage.getItem("mrblue_historial") || "[]");
+    setHistorial(h);
+  }, []);
+
+  const borrar = (idx) => {
+    const nuevo = historial.filter((_, i) => i !== idx);
+    setHistorial(nuevo);
+    localStorage.setItem("mrblue_historial", JSON.stringify(nuevo));
+  };
+
+  // Agrupar por cot_id para mostrar versiones juntas
+  const grupos = {};
+  historial.forEach((h, idx) => {
+    const id = h.cot_id || ("sin-id-" + idx);
+    if (!grupos[id]) grupos[id] = [];
+    grupos[id].push({ ...h, _idx: idx });
+  });
+
+  const gruposArr = Object.entries(grupos)
+    .map(([id, versiones]) => ({ id, versiones, nombre: versiones[0].nombre_proyecto || "Sin nombre", ultimo: versiones[0].ts_display }))
+    .filter(g => !busqueda || g.nombre.toLowerCase().includes(busqueda.toLowerCase()));
+
+  const COLS = {
+    cantidad:     "Cantidad",
+    papel_acabado_gramaje: "Papel/Gramaje",
+    tamano_final: "Tamaño final",
+    num_tintas:   "Tintas",
+    tipo_producto:"Producto",
+    prioridad:    "Prioridad",
+  };
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ background: C.navy, borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 15 }}>📂 Historial de cotizaciones</div>
+          <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>{historial.length} versión{historial.length !== 1 ? "es" : ""} guardada{historial.length !== 1 ? "s" : ""}</div>
+        </div>
+        <button onClick={onVolver} style={btn(C.muted)}>← Volver</button>
+      </div>
+
+      {/* Búsqueda */}
+      <div style={{ marginBottom: 14 }}>
+        <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
+          placeholder="Buscar por nombre de proyecto…"
+          style={inputStyle} />
+      </div>
+
+      {gruposArr.length === 0 && (
+        <div style={{ textAlign: "center", color: C.muted, padding: "30px 0", fontSize: 13 }}>
+          {busqueda ? "Sin resultados para esa búsqueda." : "No hay cotizaciones guardadas todavía."}
+        </div>
+      )}
+
+      {gruposArr.map(grupo => (
+        <div key={grupo.id} style={{ ...cardStyle, marginBottom: 12 }}>
+          {/* Header del grupo */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: C.navy }}>
+                {grupo.nombre}
+              </div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                {grupo.versiones.length} versión{grupo.versiones.length > 1 ? "es" : ""} · Última: {grupo.ultimo}
+              </div>
+              {grupo.versiones[0].tipo_producto && (
+                <span style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 20, padding: "1px 8px", fontSize: 10, color: C.muted, marginTop: 4, display: "inline-block" }}>
+                  {grupo.versiones[0].tipo_producto}
+                </span>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => onCargar(grupo.versiones[0])} style={btn(C.cyan)}>
+                Cargar última
+              </button>
+              <button onClick={() => onDuplicar(grupo.versiones[0])} style={btn(C.navy)}>
+                Duplicar
+              </button>
+              <button onClick={() => setExpandido(expandido === grupo.id ? null : grupo.id)}
+                style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 8, padding: "7px 12px", fontSize: 11, color: C.muted, cursor: "pointer", fontWeight: 700 }}>
+                {expandido === grupo.id ? "▲ Ocultar" : "▼ Ver versiones"}
+              </button>
+            </div>
+          </div>
+
+          {/* Versiones expandidas */}
+          {expandido === grupo.id && (
+            <div style={{ marginTop: 14 }}>
+              {/* Tabla comparativa de versiones */}
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: C.bg }}>
+                      <th style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", border: `1px solid ${C.border}` }}>Versión</th>
+                      <th style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", border: `1px solid ${C.border}` }}>Fecha</th>
+                      {Object.values(COLS).map(l => (
+                        <th key={l} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", border: `1px solid ${C.border}` }}>{l}</th>
+                      ))}
+                      <th style={{ padding: "6px 10px", border: `1px solid ${C.border}` }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {grupo.versiones.map((v, vi) => (
+                      <tr key={vi} style={{ background: vi === 0 ? "#EAF4FB" : C.card }}>
+                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.navy, border: `1px solid ${C.border}` }}>
+                          v{v.version ?? grupo.versiones.length - vi}
+                          {vi === 0 && <span style={{ marginLeft: 6, background: C.cyan, color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 9 }}>última</span>}
+                        </td>
+                        <td style={{ padding: "8px 10px", color: C.muted, border: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{v.ts_display || "—"}</td>
+                        {Object.keys(COLS).map(k => (
+                          <td key={k} style={{ padding: "8px 10px", border: `1px solid ${C.border}`, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {k === "cantidad" && v[k] ? parseInt(v[k]).toLocaleString("es-MX") + " pzas" : (v[k] || "—")}
+                          </td>
+                        ))}
+                        <td style={{ padding: "8px 10px", border: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button onClick={() => onCargar(v)} style={{ ...btn(C.cyan), fontSize: 10, padding: "3px 8px" }}>Cargar</button>
+                            <button onClick={() => onDuplicar(v)} style={{ ...btn(C.navy), fontSize: 10, padding: "3px 8px" }}>Duplicar</button>
+                            <button onClick={() => borrar(v._idx)} style={{ background: "none", border: `1px solid ${C.red}`, color: C.red, borderRadius: 6, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>✕</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
