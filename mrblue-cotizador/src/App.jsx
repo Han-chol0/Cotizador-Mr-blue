@@ -44,18 +44,13 @@ const STANDARD_SHEETS = [
   { label: "70×100 cm", w: 70, h: 100 },
 ];
 
-// ─── Utilidades de storage (localStorage) ───────────────────────────────────
+// ─── Utilidades de storage ───────────────────────────────────────────────────
 async function storageGet(key) {
-  try {
-    const raw = localStorage.getItem("mrblue_" + key);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
+  try { const r = await window.storage.get(key); return r ? JSON.parse(r.value) : null; }
+  catch { return null; }
 }
 async function storageSet(key, val) {
-  try {
-    if (val === null) { localStorage.removeItem("mrblue_" + key); return; }
-    localStorage.setItem("mrblue_" + key, JSON.stringify(val));
-  } catch {}
+  try { await window.storage.set(key, JSON.stringify(val)); } catch {}
 }
 
 // ─── Cálculo de imposición ───────────────────────────────────────────────────
@@ -111,7 +106,7 @@ function Stat({ label, value, bold, accent }) {
 }
 
 // ─── Resultado por tamaño de pliego ──────────────────────────────────────────
-function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, compatible, showIncompatible }) {
+function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect }) {
   if (!compatible && !showIncompatible) return null;
 
   const totalRaw = result.piecesPerSheet > 0 ? Math.ceil(qty / result.piecesPerSheet) : null;
@@ -122,26 +117,43 @@ function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, co
   const totalCost = totalKg && pricePerKg ? totalKg * pricePerKg : null;
   const score = result.piecesPerSheet;
   const badgeColor = score >= 8 ? C.green : score >= 4 ? C.amber : C.coral;
+  const borderColor = isSelected ? C.cyan : compatible ? C.border : "#DDD";
+  const bgColor = isSelected ? "#EAF4FB" : compatible ? C.card : "#F8F8F8";
 
   return (
-    <div style={{
-      background: compatible ? C.card : "#F8F8F8",
-      border: `1.5px solid ${compatible ? C.border : "#DDD"}`,
-      borderRadius: 10, padding: "14px 16px",
-      opacity: compatible ? 1 : 0.5,
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: compatible && score > 0 ? 10 : 0, flexWrap: "wrap", gap: 6 }}>
+    <div
+      onClick={compatible && score > 0 ? onSelect : undefined}
+      style={{
+        background: bgColor,
+        border: (isSelected ? "2.5px" : "1.5px") + " solid " + borderColor,
+        borderRadius: 10, padding: "14px 16px",
+        opacity: compatible ? 1 : 0.45,
+        cursor: compatible && score > 0 ? "pointer" : "default",
+        transition: "border-color 0.15s, background 0.15s",
+        position: "relative",
+      }}
+    >
+      {isSelected && (
+        <div style={{
+          position: "absolute", top: 10, right: 10,
+          width: 22, height: 22, borderRadius: "50%",
+          background: C.cyan, display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 13, color: "#fff", fontWeight: 700,
+        }}>✓</div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: compatible && score > 0 ? 10 : 0, flexWrap: "wrap", gap: 6, paddingRight: isSelected ? 30 : 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: compatible ? C.navy : C.muted }}>{sheet.label}</span>
+          {isBest && compatible && score > 0 && (
+            <span style={{ background: C.green, color: "#fff", borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>⭐ Más eficiente</span>
+          )}
           {!compatible && (
-            <span style={{ background: "#DDD", color: "#888", borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>
-              Fuera de rango
-            </span>
+            <span style={{ background: "#DDD", color: "#888", borderRadius: 20, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>Fuera de rango</span>
           )}
         </div>
         {compatible && (
-          <span style={{ background: badgeColor, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
-            {score > 0 ? `${score} pzas/pliego` : "No cabe"}
+          <span style={{ background: isSelected ? C.cyan : badgeColor, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+            {score > 0 ? score + " pzas/pliego" : "No cabe"}
           </span>
         )}
       </div>
@@ -149,19 +161,23 @@ function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, co
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
           <GridPreview cols={result.cols} rows={result.rows} sheetW={sheet.w} sheetH={sheet.h} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", flex: 1 }}>
-            <Stat label="Orientación" value={result.orientation === "horizontal" ? "↔ Horizontal" : "↕ Vertical"} />
-            <Stat label="Cols × Filas" value={`${result.cols} × ${result.rows}`} />
-            <Stat label="Pliegos netos" value={totalRaw?.toLocaleString("es-MX") ?? "—"} />
-            <Stat label="Merma +" value={mermaExtra > 0 ? `+${mermaExtra}` : "0"} />
-            <Stat label="Pliegos totales" value={totalConMerma?.toLocaleString("es-MX") ?? "—"} bold />
-            <Stat label="Peso estimado" value={totalKg ? `${totalKg.toFixed(1)} kg` : "—"} />
-            {totalCost && <Stat label="Costo papel" value={`$${totalCost.toLocaleString("es-MX", { minimumFractionDigits: 2 })}`} bold accent />}
+            <Stat label="Orientación" value={result.orientation === "horizontal" ? "\u2194 Horizontal" : "\u2195 Vertical"} />
+            <Stat label="Cols x Filas" value={result.cols + " x " + result.rows} />
+            <Stat label="Pliegos netos" value={totalRaw?.toLocaleString("es-MX") ?? "\u2014"} />
+            <Stat label="Merma +" value={mermaExtra > 0 ? "+" + mermaExtra : "0"} />
+            <Stat label="Pliegos totales" value={totalConMerma?.toLocaleString("es-MX") ?? "\u2014"} bold />
+            <Stat label="Peso estimado" value={totalKg ? totalKg.toFixed(1) + " kg" : "\u2014"} />
+            {totalCost && <Stat label="Costo papel" value={"$" + totalCost.toLocaleString("es-MX", { minimumFractionDigits: 2 })} bold accent />}
           </div>
         </div>
+      )}
+      {compatible && score > 0 && !isSelected && (
+        <div style={{ marginTop: 8, fontSize: 11, color: C.muted, textAlign: "right" }}>Clic para seleccionar</div>
       )}
     </div>
   );
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Administración de proveedores y máquinas
@@ -594,6 +610,7 @@ function Calculadora({ onCalcDone }) {
   const [pricePerKg, setPricePerKg] = useState("");
   const [results, setResults] = useState(null);
   const [showIncompatible, setShowIncompatible] = useState(false);
+  const [selectedSheetLabel, setSelectedSheetLabel] = useState(null);
 
   // Proveedor/máquina
   const [proveedores, setProveedores] = useState([]);
@@ -631,15 +648,28 @@ function Calculadora({ onCalcDone }) {
 
     const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, raw, machine: selectedMachine };
     setResults(res);
-    onCalcDone(res);
+    // Auto-select the best compatible sheet
+    const autoSelect = raw.find(r => r.compatible !== false && r.result.piecesPerSheet > 0);
+    const autoLabel = autoSelect?.sheet.label ?? null;
+    setSelectedSheetLabel(autoLabel);
+    onCalcDone({ ...res, selectedSheet: autoSelect ? { ...autoSelect.sheet, ...autoSelect.result } : null });
   };
 
   const compatibles = results?.raw.filter(r => r.compatible) ?? [];
-  const best = compatibles[0] ?? results?.raw[0];
+  const autoB = compatibles[0] ?? results?.raw[0];
+  // Use selected sheet if set, otherwise fall back to best
+  const selectedRow = results?.raw.find(r => r.sheet.label === selectedSheetLabel);
+  const best = selectedRow ?? autoB;
   const bestTotal = best?.result.piecesPerSheet > 0
     ? Math.ceil(Math.ceil(results.qty / best.result.piecesPerSheet) * (1 + results.merma / 100)) : null;
 
   const incompatiblesCount = results?.raw.filter(r => !r.compatible).length ?? 0;
+
+  // When user picks a sheet, update parent calcData
+  const selectSheet = (row) => {
+    setSelectedSheetLabel(row.sheet.label);
+    onCalcDone({ ...results, selectedSheet: { ...row.sheet, ...row.result } });
+  };
 
   return (
     <div>
@@ -728,19 +758,29 @@ function Calculadora({ onCalcDone }) {
       {results && (
         <>
           {/* Barra resumen */}
-          <div style={{ background: C.navy, borderRadius: 10, padding: "12px 18px", marginBottom: 14, display: "flex", gap: 24, flexWrap: "wrap" }}>
-            {[
-              ["Mejor opción", best?.sheet.label ?? "—"],
-              ["Pzas/pliego", best?.result.piecesPerSheet ?? "—"],
-              ["Pliegos totales", bestTotal?.toLocaleString("es-MX") ?? "—"],
-              ...(results.machine ? [["Máquina", results.machine.nombre]] : []),
-              ...(results.extW && results.extH ? [["Extendido", `${results.extW}×${results.extH} cm`]] : []),
-            ].map(([l, v]) => (
-              <div key={l}>
-                <div style={{ fontSize: 10, color: "#8BBDD6", textTransform: "uppercase", letterSpacing: "0.05em" }}>{l}</div>
-                <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: "#fff" }}>{String(v)}</div>
+          <div style={{ background: C.navy, borderRadius: 10, padding: "12px 18px", marginBottom: 14 }}>
+            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: selectedSheetLabel && selectedSheetLabel !== autoB?.sheet.label ? 10 : 0 }}>
+              {[
+                ["Seleccionado", best?.sheet.label ?? "—"],
+                ["Pzas/pliego",  best?.result.piecesPerSheet ?? "—"],
+                ["Pliegos totales", bestTotal?.toLocaleString("es-MX") ?? "—"],
+                ...(results.machine ? [["Máquina", results.machine.nombre]] : []),
+                ...(results.extW && results.extH ? [["Extendido", results.extW + "×" + results.extH + " cm"]] : []),
+              ].map(([l, v]) => (
+                <div key={l}>
+                  <div style={{ fontSize: 10, color: "#8BBDD6", textTransform: "uppercase", letterSpacing: "0.05em" }}>{l}</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: "#fff" }}>{String(v)}</div>
+                </div>
+              ))}
+            </div>
+            {selectedSheetLabel && selectedSheetLabel !== autoB?.sheet.label && (
+              <div style={{ background: "rgba(255,255,255,0.1)", borderRadius: 6, padding: "5px 10px", fontSize: 11, color: "#8BBDD6", display: "flex", alignItems: "center", gap: 8 }}>
+                <span>⭐ Más eficiente: <strong style={{ color: "#fff" }}>{autoB?.sheet.label}</strong> ({autoB?.result.piecesPerSheet} pzas/pliego)</span>
+                <button onClick={() => selectSheet(autoB)} style={{ background: "none", border: "1px solid #8BBDD6", borderRadius: 5, padding: "2px 8px", fontSize: 10, color: "#8BBDD6", cursor: "pointer", fontWeight: 700 }}>
+                  Usar ésta
+                </button>
               </div>
-            ))}
+            )}
           </div>
 
           {/* Aviso pliegos compatibles */}
@@ -760,11 +800,14 @@ function Calculadora({ onCalcDone }) {
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
-            {results.raw.map(({ sheet, result, compatible }) => (
-              <SheetResult key={sheet.label} sheet={sheet} result={result}
+            {results.raw.map((row) => (
+              <SheetResult key={row.sheet.label} sheet={row.sheet} result={row.result}
                 qty={results.qty} mermaPercent={results.merma}
                 pricePerKg={results.pricePerKg} gramaje={results.gramaje}
-                compatible={compatible} showIncompatible={showIncompatible} />
+                compatible={row.compatible} showIncompatible={showIncompatible}
+                isSelected={row.sheet.label === selectedSheetLabel}
+                isBest={row.sheet.label === autoB?.sheet.label}
+                onSelect={() => selectSheet(row)} />
             ))}
           </div>
 
@@ -1277,100 +1320,82 @@ function AdminTemplates() {
 // MÓDULO: Envío de solicitud
 // ═══════════════════════════════════════════════════════════════════════════════
 function EnvioSolicitud({ calcData }) {
-  const [proveedores, setProveedores] = useState([{ nombre: "", email: "", telefono: "" }]);
-  const [desc, setDesc] = useState("");
-  const [producto, setProducto] = useState("");
-  const [tipoServicio, setTipoServicio] = useState(TIPOS_SERVICIO[0]);
-  const [resendKey, setResendKey] = useState("");
-  const [fromEmail, setFromEmail] = useState("");
-  const [mensajeGenerado, setMensajeGenerado] = useState("");
-  const [loadingMsg, setLoadingMsg] = useState(false);
-  const [enviando, setEnviando] = useState(false);
-  const [resultados, setResultados] = useState([]);
-  const [showConfig, setShowConfig] = useState(false);
+  const [proveedorNombre, setProveedorNombre] = useState("");
+  const [proveedorEmail, setProveedorEmail]   = useState("");
+  const [proveedorTel, setProveedorTel]       = useState("");
+  const [producto, setProducto]               = useState("");
+  const [tipoServicio, setTipoServicio]       = useState(TIPOS_SERVICIO[0]);
+  const [resendKey, setResendKey]             = useState(() => localStorage.getItem("mrblue_resend_key") || "");
+  const [fromEmail, setFromEmail]             = useState(() => localStorage.getItem("mrblue_from_email") || "");
+  const [enviando, setEnviando]               = useState(false);
+  const [resultados, setResultados]           = useState([]);
+  const [showConfig, setShowConfig]           = useState(false);
+  const [savedTemplates, setSavedTemplates]   = useState(DEFAULT_TEMPLATES);
+  const [mensajeEditado, setMensajeEditado]   = useState("");
+  const [editado, setEditado]                 = useState(false);
 
-  const addProv = () => setProveedores([...proveedores, { nombre: "", email: "", telefono: "" }]);
-  const updateProv = (i, f, v) => { const p = [...proveedores]; p[i][f] = v; setProveedores(p); };
-  const removeProv = (i) => setProveedores(proveedores.filter((_, idx) => idx !== i));
+  useEffect(() => {
+    storageGet("templates_servicio").then(d => { if (d) setSavedTemplates(d); });
+  }, []);
 
-  const best = calcData?.raw?.find(r => r.compatible !== false) ?? calcData?.raw?.[0];
-  const bestLabel = best?.sheet.label ?? "—";
-  const bestTotal = best?.result.piecesPerSheet > 0 && calcData
-    ? Math.ceil(Math.ceil(calcData.qty / best.result.piecesPerSheet) * (1 + calcData.merma / 100)) : null;
+  // Usa selectedSheet si existe (cuando el usuario eligió una imposición específica)
+  const sel = calcData?.selectedSheet;  // { label, w, h, piecesPerSheet, cols, rows, orientation }
+  const bestLabel = sel?.label
+    ?? (calcData?.raw?.find(r => r.compatible !== false) ?? calcData?.raw?.[0])?.sheet.label
+    ?? "—";
+  const piezasPorPliego = sel?.piecesPerSheet
+    ?? (calcData?.raw?.find(r => r.compatible !== false) ?? calcData?.raw?.[0])?.result.piecesPerSheet
+    ?? 0;
+  const bestTotal = piezasPorPliego > 0 && calcData
+    ? Math.ceil(Math.ceil(calcData.qty / piezasPorPliego) * (1 + calcData.merma / 100)) : null;
 
   const buildVars = () => ({
-    producto:         producto || desc || "—",
-    medida_final:     calcData ? calcData.pw + "×" + calcData.ph + " cm" : "—",
-    medida_extendida: calcData && calcData.extW ? calcData.extW + "×" + calcData.extH + " cm" : "—",
+    producto:         producto || "—",
+    medida_final:     calcData ? calcData.pw + "x" + calcData.ph + " cm" : "—",
+    medida_extendida: calcData && calcData.extW ? calcData.extW + "x" + calcData.extH + " cm" : "—",
     cantidad:         calcData ? calcData.qty.toLocaleString("es-MX") + " piezas" : "—",
     pliego:           bestLabel,
     pliegos_totales:  bestTotal ? bestTotal.toLocaleString("es-MX") : "—",
-    gramaje:          calcData ? calcData.gramaje + " g/m²" : "—",
+    gramaje:          calcData ? calcData.gramaje + " g/m2" : "—",
     merma:            calcData ? calcData.merma + "%" : "—",
     fecha:            new Date().toLocaleDateString("es-MX"),
   });
 
-  const aplicarTemplate = async () => {
-    setLoadingMsg(true); setMensajeGenerado("");
-    const savedTemplates = await storageGet("templates_servicio") || DEFAULT_TEMPLATES;
-    const tpl = savedTemplates[tipoServicio] || DEFAULT_TEMPLATES[tipoServicio] || "";
-    setMensajeGenerado(resolveTemplate(tpl, buildVars()));
-    setLoadingMsg(false);
-  };
+  const tplBase = savedTemplates[tipoServicio] || DEFAULT_TEMPLATES[tipoServicio] || "";
+  const mensajeVivo = resolveTemplate(tplBase, buildVars());
+  const mensajeFinal = editado ? mensajeEditado : mensajeVivo;
 
-  const _legacyGenerarMensaje = async () => {
-    setLoadingMsg(true); setMensajeGenerado("");
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 600, messages: [{ role: "user", content:
-        `Eres el asistente de cotizaciones de Mr. Blue Laboratorios Creativos (CDMX). Genera un mensaje profesional y directo para solicitar cotización a un proveedor de impresión offset. Tuteo formal. Sin introducciones largas.
+  // Refresca el mensaje cuando cambia el pliego seleccionado, el tipo de template o el producto
+  const selKey = calcData?.selectedSheet?.label ?? "";
+  useEffect(() => {
+    setMensajeEditado(mensajeVivo);
+    setEditado(false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tipoServicio, producto, selKey, calcData?.qty, calcData?.pw]);
 
-PRODUCTO: ${producto || desc}
-DESCRIPCIÓN: ${desc}
-MEDIDA FINAL: ${calcData ? `${calcData.pw}×${calcData.ph} cm` : "—"}
-${calcData?.extW ? `MEDIDA EXTENDIDA: ${calcData.extW}×${calcData.extH} cm` : ""}
-CANTIDAD: ${calcData ? calcData.qty.toLocaleString("es-MX") : "—"} piezas
-MEJOR PLIEGO: ${bestLabel}
-PLIEGOS (con merma ${calcData?.merma ?? 5}%): ${bestTotal?.toLocaleString("es-MX") ?? "—"}
-GRAMAJE: ${calcData?.gramaje ?? "—"} g/m²
-${calcData?.machine ? `MÁQUINA SUGERIDA: ${calcData.machine.nombre}` : ""}
-
-Solicita: precio por millar o pieza, tiempo de entrega, si incluye barniz UV/plastificado.`
-      }] }),
-    });
-    const data = await res.json();
-    setMensajeGenerado(data.content?.map(b => b.text || "").join("") || "Error.");
-    setLoadingMsg(false);
-  };
-
-  const enviarTodo = async () => {
-    if (!mensajeGenerado || proveedores.every(p => !p.nombre)) return;
+    const enviarTodo = async () => {
+    if (!proveedorNombre) return;
     setEnviando(true);
-    const res = [];
-    for (const prov of proveedores) {
-      if (!prov.nombre) continue;
-      const entry = { proveedor: prov.nombre, canales: [], waLink: null };
-      if (prov.email && resendKey && fromEmail) {
-        const r = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resendKey}` },
-          body: JSON.stringify({ from: fromEmail, to: prov.email, subject: `Solicitud de cotización – ${producto || "Producto offset"} | Mr. Blue`, text: mensajeGenerado }),
-        }).catch(() => null);
-        entry.canales.push(r?.ok ? "✓ Correo enviado" : "✗ Error al enviar correo");
-      } else if (prov.email) {
-        entry.canales.push("— Correo: configura API key en ⚙");
-      }
-      if (prov.telefono) {
-        const num = prov.telefono.replace(/\D/g, "");
-        entry.waLink = `https://wa.me/${num.startsWith("52") ? num : "52" + num}?text=${encodeURIComponent(mensajeGenerado)}`;
-        entry.canales.push("↗ Link WhatsApp listo");
-      }
-      res.push(entry);
-      const existing = await storageGet("solicitudes") || [];
-      existing.unshift({ id: crypto.randomUUID(), proveedor: prov.nombre, email: prov.email, telefono: prov.telefono, producto: producto || "Sin nombre", qty: calcData?.qty, fechaEnvio: new Date().toISOString(), status: "enviado", waLink: entry.waLink });
-      await storageSet("solicitudes", existing);
+    const entry = { proveedor: proveedorNombre, canales: [], waLink: null };
+    if (proveedorEmail && resendKey && fromEmail) {
+      const r = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + resendKey },
+        body: JSON.stringify({ from: fromEmail, to: proveedorEmail, subject: "Solicitud de cotización – " + (producto || "Producto offset") + " | Mr. Blue", text: mensajeFinal }),
+      }).catch(() => null);
+      entry.canales.push(r?.ok ? "✓ Correo enviado" : "✗ Error al enviar correo");
+    } else if (proveedorEmail) {
+      entry.canales.push("— Correo: configura API key en ⚙");
     }
-    setResultados(res);
+    if (proveedorTel) {
+      const num = proveedorTel.replace(/\D/g, "");
+      entry.waLink = "https://wa.me/" + (num.startsWith("52") ? num : "52" + num) + "?text=" + encodeURIComponent(mensajeFinal);
+      entry.canales.push("↗ Link WhatsApp listo");
+    }
+    const existing = await storageGet("solicitudes") || [];
+    existing.unshift({ id: crypto.randomUUID(), proveedor: proveedorNombre, email: proveedorEmail, telefono: proveedorTel, producto: producto || "Sin nombre", qty: calcData?.qty, fechaEnvio: new Date().toISOString(), status: "enviado", waLink: entry.waLink });
+    await storageSet("solicitudes", existing);
+    setResultados([entry]);
     setEnviando(false);
   };
 
@@ -1396,19 +1421,16 @@ Solicita: precio por millar o pieza, tiempo de entrega, si incluye barniz UV/pla
         )}
       </div>
 
+      {/* ── Producto y template ── */}
       <div style={cardStyle}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 14 }}>Producto y tipo de servicio</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
             <label style={labelStyle}>Nombre del producto</label>
-            <input value={producto} onChange={e => setProducto(e.target.value)} placeholder="Ej: Caja plegadiza 4/0, Folleto 4/4…" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>Descripción del correo del cliente</label>
-            <textarea value={desc} onChange={e => setDesc(e.target.value)} placeholder="Pega aquí la descripción del cliente…" style={{ ...inputStyle, height: 70, resize: "vertical" }} />
+            <input value={producto} onChange={e => setProducto(e.target.value)}
+              placeholder="Ej: Caja plegadiza 4/0, Folleto 4/4…" style={inputStyle} />
           </div>
 
-          {/* Selector de tipo de servicio / template */}
           <div>
             <label style={labelStyle}>Template de solicitud</label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -1424,54 +1446,75 @@ Solicita: precio por millar o pieza, tiempo de entrega, si incluye barniz UV/pla
           </div>
 
           {calcData && (
-            <div style={{ background: "#EAF4FB", borderRadius: 7, padding: "10px 14px", fontSize: 12, color: C.navy }}>
-              📐 {calcData.pw}×{calcData.ph} cm{calcData.extW ? ` · ext: ${calcData.extW}×${calcData.extH} cm` : ""} · {calcData.qty.toLocaleString("es-MX")} pzas · {bestLabel} · {bestTotal?.toLocaleString("es-MX") ?? "—"} pliegos · {calcData.gramaje} g/m²{calcData.machine ? ` · ${calcData.machine.nombre}` : ""}
+            <div style={{ background: "#EAF4FB", borderRadius: 7, padding: "9px 13px", fontSize: 12, color: C.navy }}>
+              📐 {calcData.pw}×{calcData.ph} cm{calcData.extW ? " · ext: " + calcData.extW + "×" + calcData.extH + " cm" : ""}
+              {" · "}{calcData.qty.toLocaleString("es-MX")} pzas
+              {" · "}<strong>{bestLabel}</strong>
+              {" · "}{bestTotal?.toLocaleString("es-MX") ?? "—"} pliegos
+              {" · "}{piezasPorPliego > 0 ? piezasPorPliego + " pzas/pliego" : ""}
+              {" · "}{calcData.gramaje} g/m²
             </div>
           )}
-
-          <button onClick={aplicarTemplate} disabled={loadingMsg} style={btn(loadingMsg ? C.muted : C.navy, true)}>
-            {loadingMsg ? "Aplicando…" : `✦ Aplicar template "${tipoServicio}"`}
-          </button>
         </div>
       </div>
 
-      {mensajeGenerado && (
-        <div style={{ ...cardStyle, borderColor: C.cyan }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>Mensaje generado</span>
-            <button onClick={() => navigator.clipboard.writeText(mensajeGenerado)} style={btn(C.cyan)}>Copiar</button>
-          </div>
-          <textarea value={mensajeGenerado} onChange={e => setMensajeGenerado(e.target.value)} style={{ ...inputStyle, height: 160, resize: "vertical", fontSize: 13, lineHeight: 1.6 }} />
-          <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>Editable antes de enviar.</div>
-        </div>
-      )}
-
+      {/* ── Proveedor destinatario ── */}
       <div style={cardStyle}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>Proveedores destinatarios</span>
-          <button onClick={addProv} style={btn(C.cyan)}>+ Agregar</button>
-        </div>
-        {proveedores.map((p, i) => (
-          <div key={i} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-              <span style={{ fontWeight: 700, fontSize: 13, color: C.navy }}>Proveedor {i + 1}</span>
-              {proveedores.length > 1 && <button onClick={() => removeProv(i)} style={{ background: "none", border: "none", cursor: "pointer", color: C.red, fontWeight: 700, fontSize: 13 }}>✕</button>}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px 10px" }}>
-              {[["Nombre", "nombre", "Imprenta López"], ["Correo", "email", "ventas@imprenta.mx"], ["WhatsApp", "telefono", "5512345678"]].map(([lbl, fld, ph]) => (
-                <div key={fld}>
-                  <label style={labelStyle}>{lbl}</label>
-                  <input value={p[fld]} onChange={e => updateProv(i, fld, e.target.value)} placeholder={ph} style={inputStyle} />
-                </div>
-              ))}
-            </div>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 14 }}>Proveedor destinatario</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 12px" }}>
+          <div>
+            <label style={labelStyle}>Nombre</label>
+            <input value={proveedorNombre} onChange={e => setProveedorNombre(e.target.value)}
+              placeholder="Imprenta López" style={inputStyle} />
           </div>
-        ))}
+          <div>
+            <label style={labelStyle}>Correo</label>
+            <input value={proveedorEmail} onChange={e => setProveedorEmail(e.target.value)}
+              placeholder="ventas@imprenta.mx" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>WhatsApp</label>
+            <input value={proveedorTel} onChange={e => setProveedorTel(e.target.value)}
+              placeholder="5512345678" style={inputStyle} />
+          </div>
+        </div>
       </div>
 
-      {mensajeGenerado && proveedores.some(p => p.nombre) && (
-        <button onClick={enviarTodo} disabled={enviando} style={{ ...btn(enviando ? C.muted : C.coral, true), marginBottom: 16 }}>
-          {enviando ? "Enviando…" : `✉ Enviar a ${proveedores.filter(p => p.nombre).length} proveedor${proveedores.filter(p => p.nombre).length > 1 ? "es" : ""}`}
+      {/* ── Mensaje — aparece instantáneo, editable ── */}
+      <div style={{ ...cardStyle, borderColor: C.cyan }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+          <div>
+            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>
+              Mensaje de solicitud
+            </span>
+            {editado && <span style={{ marginLeft: 8, fontSize: 11, color: C.amber }}>· editado manualmente</span>}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {editado && (
+              <button onClick={() => { setMensajeEditado(mensajeVivo); setEditado(false); }}
+                style={{ ...btn(C.muted), background: "none", color: C.muted, border: `1px solid ${C.border}`, fontSize: 11 }}>
+                Restaurar
+              </button>
+            )}
+            <button onClick={() => navigator.clipboard.writeText(mensajeFinal)} style={btn(C.cyan)}>
+              Copiar
+            </button>
+          </div>
+        </div>
+        <textarea
+          value={mensajeFinal}
+          onChange={e => { setMensajeEditado(e.target.value); setEditado(true); }}
+          style={{ ...inputStyle, height: 200, resize: "vertical", fontSize: 13, lineHeight: 1.65 }}
+        />
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+          Edita el texto si necesitas ajustar algo. El nombre del proveedor se actualiza automáticamente en la plantilla.
+        </div>
+      </div>
+
+      {proveedorNombre && (
+        <button onClick={enviarTodo} disabled={enviando}
+          style={{ ...btn(enviando ? C.muted : C.coral, true), marginBottom: 16 }}>
+          {enviando ? "Enviando…" : "✉ Enviar a " + proveedorNombre}
         </button>
       )}
 
