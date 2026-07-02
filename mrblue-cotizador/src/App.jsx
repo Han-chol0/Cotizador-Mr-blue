@@ -53,6 +53,77 @@ async function storageSet(key, val) {
   try { await window.storage.set(key, JSON.stringify(val)); } catch {}
 }
 
+// ─── Leer cotización desde URL (?cot=BASE64) ─────────────────────────────────
+function parseCotFromURL() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("cot");
+    if (!raw) return null;
+    const json = atob(decodeURIComponent(raw));
+    const data = JSON.parse(json);
+    window.history.replaceState({}, "", window.location.pathname);
+    return data;
+  } catch { return null; }
+}
+
+function toBool(v) { return v === true || v === "true" || v === 1 || v === "1"; }
+function toStr(v)  { return v != null ? String(v).trim() : ""; }
+
+function mapClickUpToCot(raw) {
+  const base = emptyCotizacion();
+  // Los campos pueden venir ya con nombres del cotizador (desde cotizar.py)
+  // o con nombres de ClickUp (desde Make.com). Soportamos ambos.
+  return {
+    ...base,
+    // ── Datos del proyecto ──────────────────────────────────────────────────
+    contacto:              toStr(raw.contacto || raw.nombre_contacto)    || base.contacto,
+    fecha_respuesta:       toStr(raw.fecha_respuesta || raw.fecha_limite) || "",
+    nombre_proyecto:       toStr(raw.nombre_proyecto || raw.proyecto || raw.name) || "",
+    cantidad:              toStr(raw.cantidad || raw.cantidad_pz)         || "",
+    tipo_producto:         toStr(raw.tipo_producto || raw.producto)       || "",
+    prioridad:             toStr(raw.prioridad)                           || base.prioridad,
+    detalles:              toStr(raw.detalles || raw.observaciones)       || "",
+    // ── Especificaciones técnicas ──────────────────────────────────────────
+    papel_acabado_gramaje: toStr(raw.papel_acabado_gramaje || raw.papel || raw.papel_gramaje) || "",
+    tamano_extendido:      toStr(raw.tamano_extendido || raw.size_extendido) || "",
+    tamano_final:          toStr(raw.tamano_final || raw.size_final)     || "",
+    num_tintas:            toStr(raw.num_tintas || raw.tintas)           || "",
+    lleva_pantone:         toBool(raw.lleva_pantone || raw.pantone),
+    pantones:              toStr(raw.pantones)                           || "",
+    son_promocionales:     toBool(raw.son_promocionales || raw.promocionales),
+    // ── Empaque ────────────────────────────────────────────────────────────
+    tipo_empaque_envio:    toStr(raw.tipo_empaque_envio || raw.empaque_envio || raw.tipo_empaque) || "",
+    comentarios_empaque:   toStr(raw.comentarios_empaque)                || "",
+    direccion:             toStr(raw.direccion)                          || base.direccion,
+    // ── Acabados ───────────────────────────────────────────────────────────
+    acabados: {
+      corte:       toBool(raw.corte),
+      alzado:      toBool(raw.alzado),
+      suaje:       toBool(raw.suaje),
+      serigrafia:  toBool(raw.serigrafia),
+      doblez:      toBool(raw.doblez),
+      rustica:     toBool(raw.rustica),
+      hotmelt:     toBool(raw.hotmelt),
+      wireo:       toBool(raw.wireo),
+      engrapado:   toBool(raw.engrapado),
+      plecado:     toBool(raw.plecado),
+      ensobretado: toBool(raw.ensobretado),
+      pasta_dura:  toBool(raw.pasta_dura),
+      empaque_esp: toBool(raw.empaque_esp),
+      hotstamping: toBool(raw.hotstamping),
+    },
+    laminado:          toBool(raw.laminado),
+    tipo_laminado:     toStr(raw.tipo_laminado)     || "",
+    caras_laminado:    toStr(raw.caras_laminado)    || "",
+    barniz_uv:         toBool(raw.barniz_uv),
+    tipo_barniz:       toStr(raw.tipo_barniz)       || "",
+    hotstamping_color: toStr(raw.hotstamping_color) || "",
+    // ── Meta ───────────────────────────────────────────────────────────────
+    _from_clickup:     true,
+    _clickup_task_id:  toStr(raw.task_id)           || null,
+  };
+}
+
 // ─── Cálculo de imposición ───────────────────────────────────────────────────
 function calcImposition(sheetW, sheetH, pieceW, pieceH, margin = 0.5) {
   const usableW = sheetW - margin * 2, usableH = sheetH - margin * 2;
@@ -1659,11 +1730,24 @@ function CheckRow({ checked, onChange, label }) {
 
 function SolicitudCotizacion({ onGuardar }) {
   const [cot, setCot] = useState(() => {
+    // 1. Prioridad: datos que vienen de ClickUp via URL
+    const fromURL = parseCotFromURL();
+    if (fromURL) {
+      const mapped = mapClickUpToCot(fromURL);
+      localStorage.setItem("mrblue_cot_activa", JSON.stringify(mapped));
+      return mapped;
+    }
+    // 2. Cotización activa guardada localmente
     const saved = localStorage.getItem("mrblue_cot_activa");
     return saved ? JSON.parse(saved) : emptyCotizacion();
   });
   const [guardado, setGuardado] = useState(false);
   const [showHistorial, setShowHistorial] = useState(false);
+  const [fromClickUp, setFromClickUp] = useState(() => {
+    const saved = localStorage.getItem("mrblue_cot_activa");
+    if (!saved) return false;
+    try { return !!JSON.parse(saved)._from_clickup; } catch { return false; }
+  });
 
   const set = (field, val) => setCot(prev => ({ ...prev, [field]: val }));
   const setAcabado = (key, val) => setCot(prev => ({ ...prev, acabados: { ...prev.acabados, [key]: val } }));
@@ -1745,7 +1829,12 @@ function SolicitudCotizacion({ onGuardar }) {
             </div>
           )}
           {!cot.cot_id && (
-            <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>Nueva cotización — sin guardar</div>
+            fromClickUp
+            ? <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ background: "#6C47FF", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 10, fontWeight: 700 }}>ClickUp</span>
+                Pre-llenado automáticamente · revisa y guarda
+              </div>
+            : <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>Nueva cotización — sin guardar</div>
           )}
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
