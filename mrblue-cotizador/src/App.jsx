@@ -76,7 +76,7 @@ function mapClickUpToCot(raw) {
   return {
     ...base,
     // ── Datos del proyecto ──────────────────────────────────────────────────
-    contacto:              toStr(raw.contacto || raw.nombre_contacto)    || base.contacto,
+    contacto:              "Remedios Flores",  // fijo por ahora
     fecha_respuesta:       toStr(raw.fecha_respuesta || raw.fecha_limite) || "",
     nombre_proyecto:       toStr(raw.nombre_proyecto || raw.proyecto || raw.name) || "",
     cantidad:              toStr(raw.cantidad || raw.cantidad_pz)         || "",
