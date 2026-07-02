@@ -599,12 +599,13 @@ function AdminProveedores() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Calculadora con selector de proveedor/máquina
 // ═══════════════════════════════════════════════════════════════════════════════
-function Calculadora({ onCalcDone }) {
-  const [pw, setPw] = useState("10");
-  const [ph, setPh] = useState("7");
-  const [extW, setExtW] = useState("");
-  const [extH, setExtH] = useState("");
-  const [qty, setQty] = useState("1000");
+function Calculadora({ onCalcDone, cotizacion }) {
+  // Pre-fill from cotizacion if available
+  const [pw, setPw]   = useState(() => { if (cotizacion?.tamano_final) { const p = cotizacion.tamano_final.split(/[xX×]/); return p[0]?.trim() || "10"; } return "10"; });
+  const [ph, setPh]   = useState(() => { if (cotizacion?.tamano_final) { const p = cotizacion.tamano_final.split(/[xX×]/); return p[1]?.trim() || "7"; } return "7"; });
+  const [extW, setExtW] = useState(() => { if (cotizacion?.tamano_extendido) { const p = cotizacion.tamano_extendido.split(/[xX×]/); return p[0]?.trim() || ""; } return ""; });
+  const [extH, setExtH] = useState(() => { if (cotizacion?.tamano_extendido) { const p = cotizacion.tamano_extendido.split(/[xX×]/); return p[1]?.trim() || ""; } return ""; });
+  const [qty, setQty] = useState(() => cotizacion?.cantidad || "1000");
   const [merma, setMerma] = useState("5");
   const [gramaje, setGramaje] = useState("300");
   const [pricePerKg, setPricePerKg] = useState("");
@@ -1319,11 +1320,11 @@ function AdminTemplates() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Envío de solicitud
 // ═══════════════════════════════════════════════════════════════════════════════
-function EnvioSolicitud({ calcData }) {
+function EnvioSolicitud({ calcData, cotizacion }) {
   const [proveedorNombre, setProveedorNombre] = useState("");
   const [proveedorEmail, setProveedorEmail]   = useState("");
   const [proveedorTel, setProveedorTel]       = useState("");
-  const [producto, setProducto]               = useState("");
+  const [producto, setProducto]               = useState(() => cotizacion?.nombre_proyecto || "");
   const [tipoServicio, setTipoServicio]       = useState(TIPOS_SERVICIO[0]);
   const [resendKey, setResendKey]             = useState(() => localStorage.getItem("mrblue_resend_key") || "");
   const [fromEmail, setFromEmail]             = useState(() => localStorage.getItem("mrblue_from_email") || "");
@@ -1421,18 +1422,47 @@ function EnvioSolicitud({ calcData }) {
         )}
       </div>
 
-      {/* ── Producto y template ── */}
-      <div style={cardStyle}>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 14 }}>Producto y tipo de servicio</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <label style={labelStyle}>Nombre del producto</label>
-            <input value={producto} onChange={e => setProducto(e.target.value)}
-              placeholder="Ej: Caja plegadiza 4/0, Folleto 4/4…" style={inputStyle} />
+      {/* ── Card único: Producto + Info + Mensaje ── */}
+      <div style={{ ...cardStyle, borderColor: C.cyan }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: C.navy }}>
+            Solicitud de cotización
+          </div>
+          {cotizacion?.nombre_proyecto && (
+            <div style={{ fontSize: 11, color: C.muted, textAlign: "right" }}>
+              <span style={{ fontWeight: 700, color: C.navy }}>{cotizacion.nombre_proyecto}</span>
+              {cotizacion.contacto ? " · " + cotizacion.contacto : ""}
+            </div>
+          )}
+        </div>
+
+        {/* Producto y template */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
+            <div>
+              <label style={labelStyle}>Nombre del producto</label>
+              <input value={producto} onChange={e => setProducto(e.target.value)}
+                placeholder="Ej: Caja plegadiza 4/0, Folleto 4/4…" style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Proveedor</label>
+              <input value={proveedorNombre} onChange={e => setProveedorNombre(e.target.value)}
+                placeholder="Imprenta López" style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Correo</label>
+              <input value={proveedorEmail} onChange={e => setProveedorEmail(e.target.value)}
+                placeholder="ventas@imprenta.mx" style={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>WhatsApp</label>
+              <input value={proveedorTel} onChange={e => setProveedorTel(e.target.value)}
+                placeholder="5512345678" style={inputStyle} />
+            </div>
           </div>
 
           <div>
-            <label style={labelStyle}>Template de solicitud</label>
+            <label style={labelStyle}>Tipo de servicio</label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {TIPOS_SERVICIO.map(t => (
                 <button key={t} onClick={() => setTipoServicio(t)} style={{
@@ -1444,49 +1474,32 @@ function EnvioSolicitud({ calcData }) {
               ))}
             </div>
           </div>
+        </div>
 
-          {calcData && (
-            <div style={{ background: "#EAF4FB", borderRadius: 7, padding: "9px 13px", fontSize: 12, color: C.navy }}>
-              📐 {calcData.pw}×{calcData.ph} cm{calcData.extW ? " · ext: " + calcData.extW + "×" + calcData.extH + " cm" : ""}
-              {" · "}{calcData.qty.toLocaleString("es-MX")} pzas
-              {" · "}<strong>{bestLabel}</strong>
-              {" · "}{bestTotal?.toLocaleString("es-MX") ?? "—"} pliegos
-              {" · "}{piezasPorPliego > 0 ? piezasPorPliego + " pzas/pliego" : ""}
-              {" · "}{calcData.gramaje} g/m²
+        {/* Info de pliegos */}
+        {calcData && (() => {
+          const pliegosNetos = piezasPorPliego > 0 ? Math.ceil(calcData.qty / piezasPorPliego) : null;
+          return (
+            <div style={{ background: "#EAF4FB", border: "1.5px solid #B8DDF5", borderRadius: 7, padding: "10px 14px", fontSize: 12, color: C.navy, marginBottom: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px 16px" }}>
+                <div><span style={{ color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", display: "block" }}>Medida final</span><strong>{calcData.pw}×{calcData.ph} cm</strong>{calcData.extW ? " · ext " + calcData.extW + "×" + calcData.extH : ""}</div>
+                <div><span style={{ color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", display: "block" }}>Cantidad</span><strong>{calcData.qty.toLocaleString("es-MX")} pzas</strong></div>
+                <div><span style={{ color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", display: "block" }}>Pliego</span><strong>{bestLabel}</strong> · {piezasPorPliego > 0 ? piezasPorPliego + " pzas/pliego" : "—"}</div>
+                <div><span style={{ color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", display: "block" }}>Pliegos sin merma</span><strong>{pliegosNetos?.toLocaleString("es-MX") ?? "—"}</strong></div>
+                <div><span style={{ color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", display: "block" }}>Merma {calcData.merma}%</span><strong>+{pliegosNetos ? (bestTotal - pliegosNetos).toLocaleString("es-MX") : "—"} pliegos</strong></div>
+                <div><span style={{ color: C.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", display: "block" }}>Total con merma</span><strong style={{ color: C.cyan }}>{bestTotal?.toLocaleString("es-MX") ?? "—"} pliegos</strong> · {calcData.gramaje} g/m²</div>
+              </div>
             </div>
-          )}
-        </div>
-      </div>
+          );
+        })()}
 
-      {/* ── Proveedor destinatario ── */}
-      <div style={cardStyle}>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 14 }}>Proveedor destinatario</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 12px" }}>
-          <div>
-            <label style={labelStyle}>Nombre</label>
-            <input value={proveedorNombre} onChange={e => setProveedorNombre(e.target.value)}
-              placeholder="Imprenta López" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>Correo</label>
-            <input value={proveedorEmail} onChange={e => setProveedorEmail(e.target.value)}
-              placeholder="ventas@imprenta.mx" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>WhatsApp</label>
-            <input value={proveedorTel} onChange={e => setProveedorTel(e.target.value)}
-              placeholder="5512345678" style={inputStyle} />
-          </div>
-        </div>
-      </div>
+        {/* Divider */}
+        <div style={{ borderTop: `1px solid ${C.border}`, marginBottom: 14 }} />
 
-      {/* ── Mensaje — aparece instantáneo, editable ── */}
-      <div style={{ ...cardStyle, borderColor: C.cyan }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+        {/* Mensaje */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
           <div>
-            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>
-              Mensaje de solicitud
-            </span>
+            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>Mensaje</span>
             {editado && <span style={{ marginLeft: 8, fontSize: 11, color: C.amber }}>· editado manualmente</span>}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -1496,9 +1509,7 @@ function EnvioSolicitud({ calcData }) {
                 Restaurar
               </button>
             )}
-            <button onClick={() => navigator.clipboard.writeText(mensajeFinal)} style={btn(C.cyan)}>
-              Copiar
-            </button>
+            <button onClick={() => navigator.clipboard.writeText(mensajeFinal)} style={btn(C.cyan)}>Copiar</button>
           </div>
         </div>
         <textarea
@@ -1507,7 +1518,7 @@ function EnvioSolicitud({ calcData }) {
           style={{ ...inputStyle, height: 200, resize: "vertical", fontSize: 13, lineHeight: 1.65 }}
         />
         <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
-          Edita el texto si necesitas ajustar algo. El nombre del proveedor se actualiza automáticamente en la plantilla.
+          Editable antes de enviar. Cambia el tipo de servicio para cambiar el template.
         </div>
       </div>
 
@@ -1538,31 +1549,382 @@ function EnvioSolicitud({ calcData }) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MÓDULO: Solicitud de Cotización
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PRIORIDADES = ["Normal", "Urgente", "Muy urgente", "Para ayer 🔥"];
+const TIPOS_PRODUCTO = [
+  "Impreso offset", "Folleto", "Catálogo", "Revista", "Libro",
+  "Caja plegadiza", "Empaque", "Etiqueta", "Tarjeta", "Poster/Banner",
+  "Promocional", "Otro",
+];
+const TIPO_EMPAQUE_ENVIO = [
+  "Caja individual", "Caja master", "Bolsa", "Film stretch",
+  "Pallet", "Sin empaque especial", "Otro",
+];
+const TIPO_LAMINADO = ["Mate", "Brillante", "Soft touch", "Anti-scratch"];
+const CARAS_LAMINADO = ["1 cara", "2 caras"];
+const TIPO_BARNIZ = ["Total", "Selectivo", "Drip-off"];
+
+const CONTACTOS_MRB = [
+  { nombre: "Remedios Flores", correo: "remedios@mrblue.com.mx" },
+  { nombre: "Mr. Blue", correo: "hola@lelab.ink" },
+];
+const DIRECCION_ENTREGA = "Mario Rojas Avendaño 178, San Simón Ticumac, CDMX";
+
+const ACABADOS_LIST = [
+  { key: "corte",         label: "Corte",          col: 0 },
+  { key: "alzado",        label: "Alzado",          col: 1 },
+  { key: "suaje",         label: "Suaje",           col: 0 },
+  { key: "serigrafia",    label: "Serigrafía",      col: 1 },
+  { key: "doblez",        label: "Doblez",          col: 1 },
+  { key: "rustica",       label: "Rústica Cosida",  col: 0 },
+  { key: "hotmelt",       label: "Hotmelt",         col: 1 },
+  { key: "wireo",         label: "Wire-O",          col: 0 },
+  { key: "engrapado",     label: "Engrapado",       col: 1 },
+  { key: "plecado",       label: "Plecado",         col: 0 },
+  { key: "ensobretado",   label: "Ensobretado",     col: 1 },
+  { key: "pasta_dura",    label: "Pasta Dura",      col: 0 },
+  { key: "empaque_esp",   label: "Empaque Especial",col: 1 },
+  { key: "hotstamping",   label: "Hot Stamping",    col: 0 },
+];
+
+const emptyCotizacion = () => ({
+  // Cliente
+  contacto: "Remedios Flores",
+  correo_contacto: "hola@lelab.ink",
+  fecha_respuesta: "",
+  direccion: DIRECCION_ENTREGA,
+  prioridad: "Normal",
+  nombre_proyecto: "",
+  cantidad: "",
+  visto_bueno: false,
+  son_promocionales: false,
+  detalles: "",
+  tipo_producto: "",
+  // Técnico
+  papel_acabado_gramaje: "",
+  tamano_extendido: "",
+  tamano_final: "",
+  num_tintas: "",
+  lleva_pantone: false,
+  pantones: "",
+  maquilar_acabados: false,
+  descripcion_acabados: "",
+  // Acabados
+  acabados: {},
+  laminado: false,
+  tipo_laminado: "",
+  caras_laminado: "",
+  barniz_uv: false,
+  tipo_barniz: "",
+  hotstamping_color: "",
+  // Empaque
+  tipo_empaque_envio: "",
+  comentarios_empaque: "",
+});
+
+function SectionTitle({ children }) {
+  return (
+    <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 12,
+      color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em",
+      borderBottom: `2px solid ${C.cyan}`, paddingBottom: 6, marginBottom: 14, marginTop: 4 }}>
+      {children}
+    </div>
+  );
+}
+
+function Field({ label, required, children }) {
+  return (
+    <div>
+      <label style={{ ...labelStyle, marginBottom: 5 }}>
+        {label}{required && <span style={{ color: C.coral, marginLeft: 3 }}>*</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+function CheckRow({ checked, onChange, label }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: C.text, userSelect: "none" }}>
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}
+        style={{ width: 15, height: 15, accentColor: C.navy, cursor: "pointer", flexShrink: 0 }} />
+      {label}
+    </label>
+  );
+}
+
+function SolicitudCotizacion({ onGuardar }) {
+  const [cot, setCot] = useState(() => {
+    const saved = localStorage.getItem("mrblue_cot_activa");
+    return saved ? JSON.parse(saved) : emptyCotizacion();
+  });
+  const [guardado, setGuardado] = useState(false);
+
+  const set = (field, val) => setCot(prev => ({ ...prev, [field]: val }));
+  const setAcabado = (key, val) => setCot(prev => ({ ...prev, acabados: { ...prev.acabados, [key]: val } }));
+
+  const guardar = () => {
+    localStorage.setItem("mrblue_cot_activa", JSON.stringify(cot));
+    onGuardar(cot);
+    setGuardado(true);
+    setTimeout(() => setGuardado(false), 2000);
+  };
+
+  const limpiar = () => {
+    const fresh = emptyCotizacion();
+    setCot(fresh);
+    localStorage.removeItem("mrblue_cot_activa");
+  };
+
+  const selectStyle = { ...inputStyle, appearance: "none" };
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ background: C.navy, borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 15 }}>Solicitud de Cotización Interno</div>
+          <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>Completa los datos antes de calcular pliegos y enviar a proveedores</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={limpiar} style={{ background: "none", border: "1.5px solid #8BBDD6", color: "#8BBDD6", borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Nueva</button>
+          <button onClick={guardar} style={btn(guardado ? C.green : C.cyan)}>
+            {guardado ? "✓ Guardado" : "Guardar y continuar →"}
+          </button>
+        </div>
+      </div>
+
+      {/* ── SECCIÓN 1: Cliente ── */}
+      <div style={cardStyle}>
+        <SectionTitle>1 · Datos del cliente</SectionTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
+          <Field label="Nombre del contacto" required>
+            <input value={cot.contacto} onChange={e => set("contacto", e.target.value)}
+              placeholder="Nombre de mi comprador" style={inputStyle} />
+          </Field>
+          <Field label="Fecha límite cotización" required>
+            <input type="date" value={cot.fecha_respuesta} onChange={e => set("fecha_respuesta", e.target.value)} style={inputStyle} />
+          </Field>
+          <Field label="Nombre del proyecto / cotización" required>
+            <input value={cot.nombre_proyecto} onChange={e => set("nombre_proyecto", e.target.value)}
+              placeholder="¿Cómo se llama el proyecto?" style={inputStyle} />
+          </Field>
+          <Field label="Cantidad solicitada (pz)" required>
+            <input type="number" value={cot.cantidad} onChange={e => set("cantidad", e.target.value)}
+              placeholder="80,000" style={inputStyle} />
+          </Field>
+          <Field label="¿Qué producto estamos cotizando?" required>
+            <select value={cot.tipo_producto} onChange={e => set("tipo_producto", e.target.value)} style={selectStyle}>
+              <option value="">Selecciona…</option>
+              {TIPOS_PRODUCTO.map(t => <option key={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Prioridad del proyecto" required>
+            <select value={cot.prioridad} onChange={e => set("prioridad", e.target.value)} style={selectStyle}>
+              {PRIORIDADES.map(p => <option key={p}>{p}</option>)}
+            </select>
+          </Field>
+          <Field label="Dirección de entrega" required>
+            <input value={cot.direccion} onChange={e => set("direccion", e.target.value)} style={inputStyle} />
+          </Field>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, justifyContent: "flex-end" }}>
+            <CheckRow checked={cot.visto_bueno} onChange={v => set("visto_bueno", v)} label="Se da Visto Bueno del proyecto" />
+            <CheckRow checked={cot.son_promocionales} onChange={v => set("son_promocionales", v)} label="Son Promocionales" />
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Detalles y observaciones de la cotización" required>
+              <textarea value={cot.detalles} onChange={e => set("detalles", e.target.value)}
+                placeholder="detalles de la cotización: son promocionales, impresos, empaque, otro... describe la solicitud"
+                style={{ ...inputStyle, height: 80, resize: "vertical" }} />
+            </Field>
+          </div>
+        </div>
+      </div>
+
+      {/* ── SECCIÓN 2: Especificaciones técnicas ── */}
+      <div style={cardStyle}>
+        <SectionTitle>2 · Especificaciones técnicas</SectionTitle>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Field label="Tipo de papel, acabado y gramaje" required>
+            <textarea value={cot.papel_acabado_gramaje} onChange={e => set("papel_acabado_gramaje", e.target.value)}
+              placeholder="Tipo de papel, acabado (Brillante-Mate-Semimate) etc y gramaje"
+              style={{ ...inputStyle, height: 70, resize: "vertical" }} />
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
+            <Field label="Tamaño extendido" required>
+              <input value={cot.tamano_extendido} onChange={e => set("tamano_extendido", e.target.value)}
+                placeholder="¿Tamaño extendido de tu producto?" style={inputStyle} />
+            </Field>
+            <Field label="Tamaño final" required>
+              <input value={cot.tamano_final} onChange={e => set("tamano_final", e.target.value)}
+                placeholder="¿Tamaño final de tu producto?" style={inputStyle} />
+            </Field>
+          </div>
+          <Field label="Número de tintas" required>
+            <textarea value={cot.num_tintas} onChange={e => set("num_tintas", e.target.value)}
+              placeholder="¿A cuántas tintas va tu proyecto?"
+              style={{ ...inputStyle, height: 60, resize: "vertical" }} />
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px", alignItems: "start" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <CheckRow checked={cot.lleva_pantone} onChange={v => set("lleva_pantone", v)} label="La impresión lleva Pantone" />
+            </div>
+            {cot.lleva_pantone && (
+              <Field label="Pantone">
+                <input value={cot.pantones} onChange={e => set("pantones", e.target.value)}
+                  placeholder="¿Qué pantones lleva?" style={inputStyle} />
+              </Field>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <CheckRow checked={cot.maquilar_acabados} onChange={v => set("maquilar_acabados", v)} label="Maquilar Acabados" />
+            </div>
+            {cot.maquilar_acabados && (
+              <Field label="Acabados">
+                <input value={cot.descripcion_acabados} onChange={e => set("descripcion_acabados", e.target.value)}
+                  placeholder="Escribe todos los acabados que lleva el proyecto!!" style={inputStyle} />
+              </Field>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── SECCIÓN 3: Acabados ── */}
+      <div style={cardStyle}>
+        <SectionTitle>3 · Acabados</SectionTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 24px", marginBottom: 14 }}>
+          {ACABADOS_LIST.map(a => (
+            <CheckRow key={a.key} checked={!!cot.acabados[a.key]} onChange={v => setAcabado(a.key, v)} label={a.label} />
+          ))}
+        </div>
+
+        {/* Laminado */}
+        <div style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
+          <CheckRow checked={cot.laminado} onChange={v => set("laminado", v)} label="Laminado" />
+          {cot.laminado && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 16px", marginTop: 10 }}>
+              <Field label="Tipo Laminado">
+                <select value={cot.tipo_laminado} onChange={e => set("tipo_laminado", e.target.value)} style={selectStyle}>
+                  <option value="">Selecciona…</option>
+                  {TIPO_LAMINADO.map(t => <option key={t}>{t}</option>)}
+                </select>
+              </Field>
+              <Field label="Caras a Laminar">
+                <select value={cot.caras_laminado} onChange={e => set("caras_laminado", e.target.value)} style={selectStyle}>
+                  <option value="">Selecciona…</option>
+                  {CARAS_LAMINADO.map(t => <option key={t}>{t}</option>)}
+                </select>
+              </Field>
+            </div>
+          )}
+        </div>
+
+        {/* Barniz UV */}
+        <div style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
+          <CheckRow checked={cot.barniz_uv} onChange={v => set("barniz_uv", v)} label="Barniz U.V." />
+          {cot.barniz_uv && (
+            <div style={{ marginTop: 10 }}>
+              <Field label="Tipo de Barniz">
+                <select value={cot.tipo_barniz} onChange={e => set("tipo_barniz", e.target.value)} style={selectStyle}>
+                  <option value="">Selecciona…</option>
+                  {TIPO_BARNIZ.map(t => <option key={t}>{t}</option>)}
+                </select>
+              </Field>
+            </div>
+          )}
+        </div>
+
+        {/* Hot Stamping color foil */}
+        {cot.acabados.hotstamping && (
+          <div style={{ background: C.bg, borderRadius: 8, padding: "12px 14px", marginBottom: 10 }}>
+            <Field label="Color Foil (Hot Stamping)">
+              <input value={cot.hotstamping_color} onChange={e => set("hotstamping_color", e.target.value)}
+                placeholder="Color del foil" style={inputStyle} />
+            </Field>
+          </div>
+        )}
+      </div>
+
+      {/* ── SECCIÓN 4: Empaque ── */}
+      <div style={cardStyle}>
+        <SectionTitle>4 · Empaque y envío</SectionTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
+          <Field label="Tipo de empaque envío" required>
+            <select value={cot.tipo_empaque_envio} onChange={e => set("tipo_empaque_envio", e.target.value)} style={selectStyle}>
+              <option value="">Selecciona…</option>
+              {TIPO_EMPAQUE_ENVIO.map(t => <option key={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="¿Comentarios sobre el empaque?">
+            <input value={cot.comentarios_empaque} onChange={e => set("comentarios_empaque", e.target.value)}
+              placeholder="Algún comentario sobre el empaque" style={inputStyle} />
+          </Field>
+        </div>
+      </div>
+
+      {/* Botón guardar */}
+      <button onClick={guardar} style={{ ...btn(guardado ? C.green : C.cyan, true), marginBottom: 8 }}>
+        {guardado ? "✓ Cotización guardada — continúa en Pliegos" : "Guardar cotización y continuar →"}
+      </button>
+      <div style={{ fontSize: 11, color: C.muted, textAlign: "center", marginBottom: 16 }}>
+        Los datos se conservan mientras trabajas. Presiona "Nueva" para empezar una cotización diferente.
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // APP PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  const [tab, setTab] = useState("calc");
-  const [calcData, setCalcData] = useState(null);
+  const [tab, setTab] = useState("cotizacion");
+  const [calcData, setCalcData]     = useState(null);
+  const [cotizacion, setCotizacion] = useState(() => {
+    const saved = localStorage.getItem("mrblue_cot_activa");
+    return saved ? JSON.parse(saved) : null;
+  });
 
   const tabs = [
-    { key: "calc",      label: "📐 Pliegos"         },
-    { key: "envio",     label: "✉ Enviar solicitud" },
-    { key: "seg",       label: "📋 Seguimiento"      },
-    { key: "admin",     label: "🏭 Proveedores"      },
-    { key: "templates", label: "📝 Templates"        },
+    { key: "cotizacion", label: "📋 Cotización"       },
+    { key: "calc",       label: "📐 Pliegos"          },
+    { key: "envio",      label: "✉ Enviar solicitud"  },
+    { key: "seg",        label: "📋 Seguimiento"       },
+    { key: "admin",      label: "🏭 Proveedores"       },
+    { key: "templates",  label: "📝 Templates"         },
   ];
+
+  const handleGuardarCot = (cot) => {
+    setCotizacion(cot);
+    setTab("calc");
+  };
 
   return (
     <div style={{ fontFamily: "Inter, sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
       <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
 
-      <div style={{ background: C.navy, padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ width: 7, height: 26, background: C.cyan, borderRadius: 2 }} />
-        <div>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 16 }}>Mr. Blue · Cotizador Offset</div>
-          <div style={{ fontSize: 11, color: "#8BBDD6" }}>Pliegos · Proveedores · Seguimiento</div>
+      <div style={{ background: C.navy, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 7, height: 26, background: C.cyan, borderRadius: 2 }} />
+          <div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 16 }}>Mr. Blue · Cotizador Offset</div>
+            <div style={{ fontSize: 11, color: "#8BBDD6" }}>
+              {cotizacion?.nombre_proyecto || "Nueva cotización"}
+            </div>
+          </div>
         </div>
+        {cotizacion && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ background: cotizacion.prioridad === "Normal" ? C.muted : cotizacion.prioridad === "Urgente" ? C.amber : C.red, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+              {cotizacion.prioridad}
+            </span>
+            <span style={{ fontSize: 11, color: "#8BBDD6" }}>
+              {cotizacion.cantidad ? parseInt(cotizacion.cantidad).toLocaleString("es-MX") + " pzas" : ""}
+            </span>
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", borderBottom: `2px solid ${C.border}`, background: C.card, paddingLeft: 16, overflowX: "auto" }}>
@@ -1577,9 +1939,12 @@ export default function App() {
       </div>
 
       <div style={{ maxWidth: 740, margin: "0 auto", padding: "20px 14px" }}>
+        {tab === "cotizacion" && (
+          <SolicitudCotizacion onGuardar={handleGuardarCot} />
+        )}
         {tab === "calc" && (
           <>
-            <Calculadora onCalcDone={setCalcData} />
+            <Calculadora onCalcDone={setCalcData} cotizacion={cotizacion} />
             {calcData && (
               <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), marginTop: 4 }}>
                 Continuar → Enviar solicitud a proveedores
@@ -1587,7 +1952,7 @@ export default function App() {
             )}
           </>
         )}
-        {tab === "envio"     && <EnvioSolicitud calcData={calcData} />}
+        {tab === "envio"     && <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} />}
         {tab === "seg"       && <Seguimiento />}
         {tab === "admin"     && <AdminProveedores />}
         {tab === "templates" && <AdminTemplates />}
