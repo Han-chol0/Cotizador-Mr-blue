@@ -300,7 +300,7 @@ function FichaPrecios({ prov, onSave }) {
   const [loadingCat, setLoadingCat] = useState(true);
   const [precios, setPrecios] = useState({});
   const [categoriaAbierta, setCategoriaAbierta] = useState("");
-  const [soloConPrecio, setSoloConPrecio] = useState(false);
+  const [soloConPrecio, setSoloConPrecio] = useState(true);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -359,6 +359,17 @@ function FichaPrecios({ prov, onSave }) {
   };
 
   const categorias = [...new Set(catalogo.map(s => s.categoria))];
+  const categoriasConPrecio = categorias.filter(cat =>
+    catalogo.some(s => s.categoria === cat && parseFloat(precios[s.id]?.precio_millar) > 0)
+  );
+  const categoriasVisibles = soloConPrecio ? categoriasConPrecio : categorias;
+
+  useEffect(() => {
+    if (categoriasVisibles.length > 0 && !categoriasVisibles.includes(categoriaAbierta)) {
+      setCategoriaAbierta(categoriasVisibles[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [soloConPrecio, categoriasVisibles.join(",")]);
 
   if (loadingCat) return <div style={{ color: C.muted, padding: "10px 4px", fontSize: 12 }}>Cargando catálogo…</div>;
 
@@ -366,6 +377,20 @@ function FichaPrecios({ prov, onSave }) {
     return (
       <div style={{ marginTop: 14, background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px", fontSize: 12, color: C.muted }}>
         No hay servicios activos en el catálogo. Agrégalos en Supabase → tabla <code>servicios_catalogo</code>.
+      </div>
+    );
+  }
+
+  if (soloConPrecio && categoriasConPrecio.length === 0) {
+    return (
+      <div style={{ marginTop: 14 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, fontSize: 12, color: C.muted, cursor: "pointer", userSelect: "none" }}>
+          <input type="checkbox" checked={soloConPrecio} onChange={e => setSoloConPrecio(e.target.checked)} />
+          Mostrar solo lo que este proveedor ya maneja (tiene precio cargado)
+        </label>
+        <div style={{ background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px", fontSize: 12, color: C.muted }}>
+          Este proveedor todavía no tiene ningún precio cargado. Desmarca la casilla de arriba para ver el catálogo completo y capturar sus primeros precios.
+        </div>
       </div>
     );
   }
@@ -385,9 +410,9 @@ function FichaPrecios({ prov, onSave }) {
         )}
       </div>
 
-      {/* Tabs de categoría — vienen directo del catálogo en Supabase */}
+      {/* Tabs de categoría — solo las que este proveedor maneja, si el filtro está activo */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-        {categorias.map(cat => (
+        {categoriasVisibles.map(cat => (
           <button key={cat} onClick={() => setCategoriaAbierta(cat)} style={{
             background: categoriaAbierta === cat ? colorForCategoria(categorias, cat) : C.bg,
             color: categoriaAbierta === cat ? "#fff" : C.muted,
@@ -399,7 +424,7 @@ function FichaPrecios({ prov, onSave }) {
 
       <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, fontSize: 12, color: C.muted, cursor: "pointer", userSelect: "none" }}>
         <input type="checkbox" checked={soloConPrecio} onChange={e => setSoloConPrecio(e.target.checked)} />
-        Mostrar solo los que ya tienen precio cargado
+        Mostrar solo lo que este proveedor ya maneja (tiene precio cargado)
       </label>
 
       {/* Encabezado columnas */}
