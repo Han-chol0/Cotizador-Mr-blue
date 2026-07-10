@@ -1081,18 +1081,6 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [showIncompatible, setShowIncompatible] = useState(false);
   const [selectedSheetLabel, setSelectedSheetLabel] = useState(null);
 
-  // Proveedor/máquina
-  const [proveedores, setProveedores] = useState([]);
-  const [selectedProvId, setSelectedProvId] = useState("");
-  const [selectedMachineId, setSelectedMachineId] = useState("");
-
-  useEffect(() => {
-    loadProveedoresDB().then(setProveedores);
-  }, []);
-
-  const selectedProv = proveedores.find(p => p.id === selectedProvId);
-  const selectedMachine = selectedProv?.maquinas.find(m => m.id === selectedMachineId) || null;
-
   const calcular = () => {
     const pw_ = parseFloat(pw), ph_ = parseFloat(ph), qty_ = parseInt(qty);
     const extW_ = parseFloat(extW) || null, extH_ = parseFloat(extH) || null;
@@ -1100,12 +1088,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
     if (!pw_ || !ph_ || !qty_) return;
     const impW = extW_ || pw_, impH = extH_ || ph_;
 
-    const sheetsWithCompat = filterSheetsByMachine(
-      selectedMachine && selectedMachine.minW
-        ? { minW: parseFloat(selectedMachine.minW), minH: parseFloat(selectedMachine.minH),
-            maxW: parseFloat(selectedMachine.maxW), maxH: parseFloat(selectedMachine.maxH) }
-        : null
-    );
+    const sheetsWithCompat = filterSheetsByMachine(null);
 
     const raw = sheetsWithCompat.map(({ label, w, h, compatible }) => ({
       sheet: { label, w, h }, compatible,
@@ -1115,7 +1098,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
       return b.result.piecesPerSheet - a.result.piecesPerSheet;
     });
 
-    const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, raw, machine: selectedMachine };
+    const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, raw };
     setResults(res);
     // Auto-select the best compatible sheet
     const autoSelect = raw.find(r => r.compatible !== false && r.result.piecesPerSheet > 0);
@@ -1142,51 +1125,6 @@ function Calculadora({ onCalcDone, cotizacion }) {
 
   return (
     <div>
-      {/* Selector Proveedor → Máquina */}
-      <div style={cardStyle}>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 12 }}>
-          Proveedor y máquina <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>(opcional — filtra tamaños de pliego)</span>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
-          <div>
-            <label style={labelStyle}>Proveedor</label>
-            <select value={selectedProvId}
-              onChange={e => { setSelectedProvId(e.target.value); setSelectedMachineId(""); }}
-              style={{ ...inputStyle, appearance: "none" }}>
-              <option value="">— Sin filtro —</option>
-              {proveedores.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-            </select>
-          </div>
-          <div>
-            <label style={labelStyle}>Máquina</label>
-            <select value={selectedMachineId} onChange={e => setSelectedMachineId(e.target.value)}
-              disabled={!selectedProv || selectedProv.maquinas.length === 0}
-              style={{ ...inputStyle, appearance: "none", opacity: !selectedProv ? 0.5 : 1 }}>
-              <option value="">— Todas las máquinas —</option>
-              {(selectedProv?.maquinas ?? []).map(m => (
-                <option key={m.id} value={m.id}>{m.nombre} ({m.tipo})</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Info de máquina seleccionada */}
-        {selectedMachine && (
-          <div style={{ marginTop: 10, background: "#EAF4FB", borderRadius: 7, padding: "10px 14px", fontSize: 12, color: C.navy }}>
-            <strong>{selectedMachine.nombre}</strong> · {selectedMachine.tipo}
-            {selectedMachine.minW ? ` · Pliego ${selectedMachine.minW}×${selectedMachine.minH} – ${selectedMachine.maxW}×${selectedMachine.maxH} cm` : ""}
-            {selectedMachine.tiraje_minimo ? ` · Tiraje mín. ${parseInt(selectedMachine.tiraje_minimo).toLocaleString("es-MX")}` : ""}
-            {selectedMachine.colores.length > 0 && <span> · {selectedMachine.colores.join(", ")}</span>}
-          </div>
-        )}
-
-        {selectedProv && selectedProv.maquinas.length === 0 && (
-          <div style={{ marginTop: 8, fontSize: 12, color: C.amber }}>
-            ⚠ Este proveedor no tiene máquinas registradas. Ve a la pestaña Proveedores para agregar.
-          </div>
-        )}
-      </div>
-
       {/* Datos del producto */}
       <div style={cardStyle}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 14 }}>Datos del producto</div>
@@ -1261,22 +1199,6 @@ function Calculadora({ onCalcDone, cotizacion }) {
               </div>
             )}
           </div>
-
-          {/* Aviso pliegos compatibles */}
-          {selectedMachine && (
-            <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, color: C.navy, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-              <span>
-                <strong>{compatibles.length}</strong> tamaño{compatibles.length !== 1 ? "s" : ""} compatible{compatibles.length !== 1 ? "s" : ""} con {selectedMachine.nombre}
-                {incompatiblesCount > 0 && ` · ${incompatiblesCount} descartado${incompatiblesCount > 1 ? "s" : ""}`}
-              </span>
-              {incompatiblesCount > 0 && (
-                <button onClick={() => setShowIncompatible(s => !s)}
-                  style={{ background: "none", border: `1px solid ${C.cyan}`, borderRadius: 6, padding: "3px 10px", fontSize: 11, color: C.cyan, cursor: "pointer", fontWeight: 700 }}>
-                  {showIncompatible ? "Ocultar descartados" : "Ver descartados"}
-                </button>
-              )}
-            </div>
-          )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
             {results.raw.map((row) => (
