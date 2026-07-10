@@ -264,31 +264,27 @@ function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, co
 // MÓDULO: Administración de proveedores y máquinas
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Procesos que puede cotizar un proveedor (mismos que hoja de costos)
-const PROCESOS_PROVEEDOR = [
-  { key: "impresion",    label: "Impresión",       grupo: "Base"       },
-  { key: "papel",        label: "Papel",           grupo: "Base"       },
-  { key: "flete",        label: "Flete",           grupo: "Base"       },
-  { key: "pantone",      label: "Tintas Pantone",  grupo: "Impresión"  },
-  { key: "alzado",       label: "Alzado",          grupo: "Acabados"   },
-  { key: "corte",        label: "Corte",           grupo: "Acabados"   },
-  { key: "barniz_uv",    label: "Barniz U.V.",     grupo: "Acabados"   },
-  { key: "serigrafia",   label: "Serigrafía",      grupo: "Acabados"   },
-  { key: "laminado",     label: "Laminado",        grupo: "Acabados"   },
-  { key: "suaje",        label: "Suaje",           grupo: "Acabados"   },
-  { key: "hotmelt",      label: "Hotmelt",         grupo: "Acabados"   },
-  { key: "pasta_dura",   label: "Pasta Dura",      grupo: "Acabados"   },
-  { key: "plecado",      label: "Plecado",         grupo: "Acabados"   },
-  { key: "doblez",       label: "Doblez",          grupo: "Acabados"   },
-  { key: "engrapado",    label: "Engrapado",       grupo: "Acabados"   },
-  { key: "rustica",      label: "Rústica Cosida",  grupo: "Acabados"   },
-  { key: "wireo",        label: "Wire-O",          grupo: "Acabados"   },
-  { key: "hotstamping",  label: "Hotstamping",     grupo: "Acabados"   },
-  { key: "empaque",      label: "Empaque especial",grupo: "Empaque"    },
-  { key: "promocionales",label: "Promocionales",   grupo: "Empaque"    },
-];
+// ── Catálogo de servicios: ahora vive en Supabase (tabla servicios_catalogo),
+// no en el código. Agregar/editar/quitar categorías o servicios se hace desde
+// el Table Editor de Supabase y aparece aquí automáticamente.
+async function loadServiciosCatalogo() {
+  const { data, error } = await supabase
+    .from("servicios_catalogo")
+    .select("id, nombre, categoria, unidad_precio")
+    .eq("activo", true)
+    .order("categoria", { ascending: true })
+    .order("nombre", { ascending: true });
+  if (error) { console.error(error); return []; }
+  return data || [];
+}
 
-const GRUPOS_COLOR = { "Base": C.cyan, "Impresión": C.navy, "Acabados": "#7C4DFF", "Empaque": C.coral };
+// Paleta que se va asignando en orden a cada categoría que aparezca en el catálogo,
+// para que categorías nuevas (agregadas en Supabase) también tengan color sin tocar código.
+const PALETA_CATEGORIAS = [C.cyan, C.navy, "#7C4DFF", C.coral, C.green, C.amber, C.purple];
+function colorForCategoria(categorias, cat) {
+  const idx = categorias.indexOf(cat);
+  return idx >= 0 ? PALETA_CATEGORIAS[idx % PALETA_CATEGORIAS.length] : C.muted;
+}
 
 function fmtP(n) {
   if (!n && n !== 0) return "—";
@@ -296,22 +292,37 @@ function fmtP(n) {
 }
 
 // ── Editor de precios de un proveedor ────────────────────────────────────────
+// El catálogo de servicios/procesos se lee de Supabase (servicios_catalogo),
+// así que agregar o quitar servicios ahí se refleja aquí sin tocar código.
 function FichaPrecios({ prov, onSave }) {
-  // precios: { [key]: { precio_millar, rango_min, rango_max, notas, historial: [{precio, fecha, qty}] } }
-  const initPrecios = () => {
-    const base = {};
-    PROCESOS_PROVEEDOR.forEach(p => {
-      base[p.key] = prov.precios?.[p.key] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
-    });
-    return base;
-  };
-
-  const [precios, setPrecios] = useState(initPrecios);
-  const [grupoAbierto, setGrupoAbierto] = useState("Base");
+  // precios: { [servicio_id]: { precio_millar, rango_min, rango_max, notas, historial: [{precio, fecha, qty}] } }
+  const [catalogo, setCatalogo] = useState([]);
+  const [loadingCat, setLoadingCat] = useState(true);
+  const [precios, setPrecios] = useState({});
+  const [categoriaAbierta, setCategoriaAbierta] = useState("");
   const [saved, setSaved] = useState(false);
 
-  const update = (key, field, val) =>
-    setPrecios(prev => ({ ...prev, [key]: { ...prev[key], [field]: val } }));
+  useEffect(() => {
+    let vivo = true;
+    setLoadingCat(true);
+    loadServiciosCatalogo().then(cat => {
+      if (!vivo) return;
+      setCatalogo(cat);
+      const base = {};
+      cat.forEach(s => {
+        base[s.id] = prov.precios?.[s.id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
+      });
+      setPrecios(base);
+      const categorias = [...new Set(cat.map(s => s.categoria))];
+      setCategoriaAbierta(categorias[0] || "");
+      setLoadingCat(false);
+    });
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prov.id]);
+
+  const update = (id, field, val) =>
+    setPrecios(prev => ({ ...prev, [id]: { ...prev[id], [field]: val } }));
 
   const guardar = () => {
     onSave({ ...prov, precios });
@@ -319,19 +330,29 @@ function FichaPrecios({ prov, onSave }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
-  const grupos = [...new Set(PROCESOS_PROVEEDOR.map(p => p.grupo))];
+  const categorias = [...new Set(catalogo.map(s => s.categoria))];
+
+  if (loadingCat) return <div style={{ color: C.muted, padding: "10px 4px", fontSize: 12 }}>Cargando catálogo…</div>;
+
+  if (categorias.length === 0) {
+    return (
+      <div style={{ marginTop: 14, background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px", fontSize: 12, color: C.muted }}>
+        No hay servicios activos en el catálogo. Agrégalos en Supabase → tabla <code>servicios_catalogo</code>.
+      </div>
+    );
+  }
 
   return (
     <div style={{ marginTop: 14 }}>
-      {/* Tabs de grupo */}
+      {/* Tabs de categoría — vienen directo del catálogo en Supabase */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-        {grupos.map(g => (
-          <button key={g} onClick={() => setGrupoAbierto(g)} style={{
-            background: grupoAbierto === g ? (GRUPOS_COLOR[g] || C.navy) : C.bg,
-            color: grupoAbierto === g ? "#fff" : C.muted,
-            border: `1.5px solid ${grupoAbierto === g ? (GRUPOS_COLOR[g] || C.navy) : C.border}`,
-            borderRadius: 20, padding: "4px 13px", fontSize: 11, fontWeight: 700, cursor: "pointer",
-          }}>{g}</button>
+        {categorias.map(cat => (
+          <button key={cat} onClick={() => setCategoriaAbierta(cat)} style={{
+            background: categoriaAbierta === cat ? colorForCategoria(categorias, cat) : C.bg,
+            color: categoriaAbierta === cat ? "#fff" : C.muted,
+            border: `1.5px solid ${categoriaAbierta === cat ? colorForCategoria(categorias, cat) : C.border}`,
+            borderRadius: 20, padding: "4px 13px", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "capitalize",
+          }}>{cat}</button>
         ))}
       </div>
 
@@ -339,14 +360,14 @@ function FichaPrecios({ prov, onSave }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 80px", gap: "0 8px",
         padding: "0 4px 6px", fontSize: 10, fontWeight: 700, color: C.muted,
         textTransform: "uppercase", letterSpacing: "0.06em" }}>
-        <div>Proceso</div>
-        <div style={{ textAlign: "right" }}>$/Millar</div>
+        <div>Servicio</div>
+        <div style={{ textAlign: "right" }}>$ Precio</div>
         <div style={{ textAlign: "right" }}>Tiraje mín</div>
         <div style={{ textAlign: "right" }}>Tiraje máx</div>
       </div>
 
-      {PROCESOS_PROVEEDOR.filter(p => p.grupo === grupoAbierto).map(p => {
-        const d = precios[p.key];
+      {catalogo.filter(s => s.categoria === categoriaAbierta).map(s => {
+        const d = precios[s.id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
         const hist = d.historial || [];
         const ultimo = hist.length > 0 ? hist[hist.length - 1] : null;
         const variacion = hist.length > 1
@@ -354,13 +375,14 @@ function FichaPrecios({ prov, onSave }) {
           : null;
 
         return (
-          <div key={p.key} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 6, overflow: "hidden" }}>
+          <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 6, overflow: "hidden" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 80px", gap: "0 8px", padding: "10px 12px", alignItems: "center" }}>
               <div>
-                <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{p.label}</div>
+                <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{s.nombre}</div>
+                {s.unidad_precio && <div style={{ fontSize: 10, color: C.muted }}>por {s.unidad_precio}</div>}
                 {ultimo && (
                   <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>
-                    Último: ${fmtP(ultimo.precio)}/millar
+                    Último: ${fmtP(ultimo.precio)}
                     {variacion !== null && (
                       <span style={{ marginLeft: 6, color: variacion > 0 ? C.red : C.green, fontWeight: 700 }}>
                         {variacion > 0 ? "▲" : "▼"}{Math.abs(variacion).toFixed(1)}%
@@ -373,21 +395,21 @@ function FichaPrecios({ prov, onSave }) {
               <div>
                 <div style={{ position: "relative" }}>
                   <span style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
-                  <input value={d.precio_millar} onChange={e => update(p.key, "precio_millar", e.target.value)}
+                  <input value={d.precio_millar} onChange={e => update(s.id, "precio_millar", e.target.value)}
                     type="number" step="0.01" placeholder="0.00"
                     style={{ ...inputStyle, paddingLeft: 18, fontSize: 12, textAlign: "right", padding: "6px 8px 6px 18px" }} />
                 </div>
               </div>
-              <input value={d.rango_min} onChange={e => update(p.key, "rango_min", e.target.value)}
+              <input value={d.rango_min} onChange={e => update(s.id, "rango_min", e.target.value)}
                 type="number" placeholder="1,000" title="Tiraje mínimo"
                 style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
-              <input value={d.rango_max} onChange={e => update(p.key, "rango_max", e.target.value)}
+              <input value={d.rango_max} onChange={e => update(s.id, "rango_max", e.target.value)}
                 type="number" placeholder="50,000" title="Tiraje máximo"
                 style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
             </div>
             {/* Notas */}
             <div style={{ padding: "0 12px 8px" }}>
-              <input value={d.notas} onChange={e => update(p.key, "notas", e.target.value)}
+              <input value={d.notas} onChange={e => update(s.id, "notas", e.target.value)}
                 placeholder="Notas (incluye setup, planchas, condiciones especiales…)"
                 style={{ ...inputStyle, fontSize: 11, padding: "4px 8px", color: C.muted }} />
             </div>
@@ -415,18 +437,10 @@ function FichaPrecios({ prov, onSave }) {
 
 // ── Capa de datos: Proveedores, Máquinas y Tarifas (Supabase) ────────────────
 // Reconstruye la misma forma que usaba proveedores_db en window.storage:
-//   [{ id, nombre, maquinas:[...], precios:{ [clave]: {precio_millar, rango_min, rango_max, notas, historial:[]} } }]
+//   [{ id, nombre, maquinas:[...], precios:{ [servicio_id]: {precio_millar, rango_min, rango_max, notas, historial:[]} } }]
 // para no tener que tocar los componentes que ya consumen ese shape.
-
-let _servicioIdCache = null; // { [clave]: uuid } — evita ir y venir a Supabase en cada guardado
-async function getServicioId(clave) {
-  if (!_servicioIdCache) {
-    const { data, error } = await supabase.from("servicios_catalogo").select("id, clave");
-    if (error) { console.error(error); return null; }
-    _servicioIdCache = Object.fromEntries((data || []).filter(s => s.clave).map(s => [s.clave, s.id]));
-  }
-  return _servicioIdCache[clave] || null;
-}
+// precios ahora se indexa por el id real del servicio en servicios_catalogo,
+// así que no depende de una lista fija de "claves" escrita en el código.
 
 async function loadProveedoresDB() {
   const { data: provs, error: e1 } = await supabase
@@ -436,7 +450,7 @@ async function loadProveedoresDB() {
   const { data: maqs } = await supabase.from("maquinas").select("*");
   const { data: tarifas } = await supabase
     .from("tarifas")
-    .select("proveedor_id, precio, notas_precio, tiraje_min, tiraje_max, qty_referencia, created_at, servicio:servicios_catalogo(clave)")
+    .select("proveedor_id, servicio_id, precio, notas_precio, tiraje_min, tiraje_max, qty_referencia, created_at")
     .order("created_at", { ascending: true });
 
   return (provs || []).map(p => {
@@ -450,18 +464,16 @@ async function loadProveedoresDB() {
       }));
 
     const precios = {};
-    PROCESOS_PROVEEDOR.forEach(pp => {
-      precios[pp.key] = { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
-    });
     (tarifas || []).filter(t => t.proveedor_id === p.id).forEach(t => {
-      const key = t.servicio?.clave;
-      if (!key || !precios[key]) return;
-      precios[key].historial.push({ precio: t.precio, fecha: t.created_at, qty: t.qty_referencia });
+      if (!t.servicio_id) return;
+      const proceso = precios[t.servicio_id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
+      proceso.historial.push({ precio: t.precio, fecha: t.created_at, qty: t.qty_referencia });
       // Como viene ordenado asc por fecha, el último que se escribe queda como el vigente
-      precios[key].precio_millar = t.precio;
-      precios[key].rango_min = t.tiraje_min ?? "";
-      precios[key].rango_max = t.tiraje_max ?? "";
-      precios[key].notas = t.notas_precio || "";
+      proceso.precio_millar = t.precio;
+      proceso.rango_min = t.tiraje_min ?? "";
+      proceso.rango_max = t.tiraje_max ?? "";
+      proceso.notas = t.notas_precio || "";
+      precios[t.servicio_id] = proceso;
     });
 
     return { id: p.id, nombre: p.nombre, maquinas, precios };
@@ -497,11 +509,12 @@ async function deleteMachineDB(machineId) {
 
 // Guarda solo los precios que realmente cambiaron respecto a `previos`, insertando
 // una fila nueva en `tarifas` por cada uno (así se conserva el historial completo).
+// `precios` viene indexado por servicio_id real, así que se inserta directo.
 async function savePreciosDB(provId, precios, previos) {
   const rows = [];
-  for (const key of Object.keys(precios)) {
-    const d = precios[key];
-    const prev = previos?.[key];
+  for (const servicio_id of Object.keys(precios)) {
+    const d = precios[servicio_id];
+    const prev = previos?.[servicio_id];
     const sinValor = d.precio_millar === "" || d.precio_millar == null;
     if (sinValor) continue;
     const cambio = !prev || String(prev.precio_millar) !== String(d.precio_millar)
@@ -510,8 +523,6 @@ async function savePreciosDB(provId, precios, previos) {
       || String(prev.notas) !== String(d.notas);
     if (!cambio) continue;
 
-    const servicio_id = await getServicioId(key);
-    if (!servicio_id) continue;
     rows.push({
       proveedor_id: provId, servicio_id,
       precio: parseFloat(d.precio_millar),
@@ -525,11 +536,9 @@ async function savePreciosDB(provId, precios, previos) {
   }
 }
 
-async function registrarPrecioEnFicha(proveedorId, procesoKey, precio, qty, fecha) {
-  const servicio_id = await getServicioId(procesoKey);
-  if (!servicio_id) return;
+async function registrarPrecioEnFicha(proveedorId, servicioId, precio, qty, fecha) {
   const { error } = await supabase.from("tarifas").insert({
-    proveedor_id: proveedorId, servicio_id,
+    proveedor_id: proveedorId, servicio_id: servicioId,
     precio: parseFloat(precio),
     qty_referencia: qty ? parseInt(qty) : null,
   });
@@ -685,7 +694,7 @@ function AdminProveedores() {
       )}
 
       {proveedores.map(prov => {
-        const preciosConDatos = PROCESOS_PROVEEDOR.filter(p => parseFloat(prov.precios?.[p.key]?.precio_millar) > 0).length;
+        const preciosConDatos = Object.values(prov.precios || {}).filter(d => parseFloat(d?.precio_millar) > 0).length;
         const maqCount = prov.maquinas?.length ?? 0;
 
         return (
@@ -1050,15 +1059,25 @@ function diasDesde(isoDate) { return Math.floor((Date.now() - new Date(isoDate))
 // MÓDULO: Seguimiento
 // ═══════════════════════════════════════════════════════════════════════════════
 function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
-  // Panel para capturar precios que mandó el proveedor al responder
+  // Panel para capturar precios que mandó el proveedor al responder.
+  // El catálogo de servicios se lee de Supabase, igual que en FichaPrecios.
+  const [catalogo, setCatalogo] = useState([]);
+  const [loadingCat, setLoadingCat] = useState(true);
   const [precios, setPrecios] = useState({});
-  const [procesosActivos, setProcesosActivos] = useState(["impresion", "papel", "flete"]);
+  const [procesosActivos, setProcesosActivos] = useState([]);
   const [guardando, setGuardando] = useState(false);
 
-  const toggleProceso = (key) =>
-    setProcesosActivos(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+  useEffect(() => {
+    loadServiciosCatalogo().then(cat => {
+      setCatalogo(cat);
+      setLoadingCat(false);
+    });
+  }, []);
 
-  const updatePrecio = (key, val) => setPrecios(prev => ({ ...prev, [key]: val }));
+  const toggleProceso = (id) =>
+    setProcesosActivos(prev => prev.includes(id) ? prev.filter(k => k !== id) : [...prev, id]);
+
+  const updatePrecio = (id, val) => setPrecios(prev => ({ ...prev, [id]: val }));
 
   const guardar = async () => {
     setGuardando(true);
@@ -1067,10 +1086,10 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
     const provMatch = proveedoresDb.find(p => p.nombre === sol.proveedor);
 
     if (provMatch) {
-      for (const key of procesosActivos) {
-        const precio = precios[key];
+      for (const id of procesosActivos) {
+        const precio = precios[id];
         if (precio && parseFloat(precio) > 0) {
-          await registrarPrecioEnFicha(provMatch.id, key, precio, sol.qty, new Date().toISOString());
+          await registrarPrecioEnFicha(provMatch.id, id, precio, sol.qty, new Date().toISOString());
         }
       }
     }
@@ -1078,7 +1097,7 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
     setGuardando(false);
   };
 
-  const grupos = [...new Set(PROCESOS_PROVEEDOR.map(p => p.grupo))];
+  const categorias = [...new Set(catalogo.map(s => s.categoria))];
 
   return (
     <div style={{ marginTop: 12, background: "#F0FFF4", border: `1.5px solid ${C.green}`, borderRadius: 8, padding: 14 }}>
@@ -1086,40 +1105,46 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
         Registrar precios recibidos de {sol.proveedor}
       </div>
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
-        Activa los procesos que cotizaron y captura el precio por millar. Estos datos se guardarán en su ficha histórica.
+        Activa los servicios que cotizaron y captura el precio. Estos datos se guardarán en su ficha histórica.
       </div>
 
-      {/* Selector de procesos */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
-        {PROCESOS_PROVEEDOR.map(p => (
-          <button key={p.key} onClick={() => toggleProceso(p.key)} style={{
-            background: procesosActivos.includes(p.key) ? (GRUPOS_COLOR[p.grupo] || C.navy) : C.bg,
-            color: procesosActivos.includes(p.key) ? "#fff" : C.muted,
-            border: `1.5px solid ${procesosActivos.includes(p.key) ? (GRUPOS_COLOR[p.grupo] || C.navy) : C.border}`,
-            borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
-          }}>{p.label}</button>
-        ))}
-      </div>
+      {loadingCat ? (
+        <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Cargando catálogo…</div>
+      ) : (
+        <>
+          {/* Selector de servicios */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
+            {catalogo.map(s => (
+              <button key={s.id} onClick={() => toggleProceso(s.id)} style={{
+                background: procesosActivos.includes(s.id) ? colorForCategoria(categorias, s.categoria) : C.bg,
+                color: procesosActivos.includes(s.id) ? "#fff" : C.muted,
+                border: `1.5px solid ${procesosActivos.includes(s.id) ? colorForCategoria(categorias, s.categoria) : C.border}`,
+                borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+              }}>{s.nombre}</button>
+            ))}
+          </div>
 
-      {/* Captura de precios */}
-      {procesosActivos.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
-          {procesosActivos.map(key => {
-            const proc = PROCESOS_PROVEEDOR.find(p => p.key === key);
-            if (!proc) return null;
-            return (
-              <div key={key} style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8, alignItems: "center" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{proc.label}</div>
-                <div style={{ position: "relative" }}>
-                  <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
-                  <input value={precios[key] || ""} onChange={e => updatePrecio(key, e.target.value)}
-                    type="number" step="0.01" placeholder="0.00"
-                    style={{ ...inputStyle, paddingLeft: 20, fontSize: 13, textAlign: "right", padding: "7px 8px 7px 20px" }} />
-                </div>
-              </div>
-            );
-          })}
-        </div>
+          {/* Captura de precios */}
+          {procesosActivos.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+              {procesosActivos.map(id => {
+                const proc = catalogo.find(s => s.id === id);
+                if (!proc) return null;
+                return (
+                  <div key={id} style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8, alignItems: "center" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{proc.nombre}</div>
+                    <div style={{ position: "relative" }}>
+                      <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
+                      <input value={precios[id] || ""} onChange={e => updatePrecio(id, e.target.value)}
+                        type="number" step="0.01" placeholder="0.00"
+                        style={{ ...inputStyle, paddingLeft: 20, fontSize: 13, textAlign: "right", padding: "7px 8px 7px 20px" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       <div style={{ display: "flex", gap: 8 }}>
