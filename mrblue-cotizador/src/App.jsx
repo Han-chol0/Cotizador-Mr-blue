@@ -300,6 +300,7 @@ function FichaPrecios({ prov, onSave }) {
   const [loadingCat, setLoadingCat] = useState(true);
   const [precios, setPrecios] = useState({});
   const [categoriaAbierta, setCategoriaAbierta] = useState("");
+  const [soloConPrecio, setSoloConPrecio] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -385,7 +386,7 @@ function FichaPrecios({ prov, onSave }) {
       </div>
 
       {/* Tabs de categoría — vienen directo del catálogo en Supabase */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
         {categorias.map(cat => (
           <button key={cat} onClick={() => setCategoriaAbierta(cat)} style={{
             background: categoriaAbierta === cat ? colorForCategoria(categorias, cat) : C.bg,
@@ -395,6 +396,11 @@ function FichaPrecios({ prov, onSave }) {
           }}>{cat}</button>
         ))}
       </div>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, fontSize: 12, color: C.muted, cursor: "pointer", userSelect: "none" }}>
+        <input type="checkbox" checked={soloConPrecio} onChange={e => setSoloConPrecio(e.target.checked)} />
+        Mostrar solo los que ya tienen precio cargado
+      </label>
 
       {/* Encabezado columnas */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 80px", gap: "0 8px",
@@ -406,7 +412,10 @@ function FichaPrecios({ prov, onSave }) {
         <div style={{ textAlign: "right" }}>Tiraje máx</div>
       </div>
 
-      {catalogo.filter(s => s.categoria === categoriaAbierta).map(s => {
+      {catalogo
+        .filter(s => s.categoria === categoriaAbierta)
+        .filter(s => !soloConPrecio || parseFloat(precios[s.id]?.precio_millar) > 0)
+        .map(s => {
         const d = precios[s.id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
         const hist = d.historial || [];
         const ultimo = hist.length > 0 ? hist[hist.length - 1] : null;
@@ -467,6 +476,12 @@ function FichaPrecios({ prov, onSave }) {
           </div>
         );
       })}
+
+      {catalogo.filter(s => s.categoria === categoriaAbierta).filter(s => !soloConPrecio || parseFloat(precios[s.id]?.precio_millar) > 0).length === 0 && (
+        <div style={{ color: C.muted, fontSize: 12, padding: "10px 4px" }}>
+          {soloConPrecio ? "Ningún servicio de esta categoría tiene precio cargado todavía." : "Sin servicios en esta categoría."}
+        </div>
+      )}
 
       <button onClick={guardar} style={{ ...btn(saved ? C.green : C.cyan), marginTop: 8 }}>
         {saved ? "✓ Precios guardados" : "Guardar precios"}
