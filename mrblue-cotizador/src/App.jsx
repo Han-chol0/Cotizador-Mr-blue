@@ -444,7 +444,7 @@ function FichaPrecios({ prov, onSave }) {
 
 async function loadProveedoresDB() {
   const { data: provs, error: e1 } = await supabase
-    .from("proveedores").select("id, nombre").order("nombre");
+    .from("proveedores").select("id, nombre, tipo").order("nombre");
   if (e1) { console.error(e1); return []; }
 
   const { data: maqs } = await supabase.from("maquinas").select("*");
@@ -476,14 +476,24 @@ async function loadProveedoresDB() {
       precios[t.servicio_id] = proceso;
     });
 
-    return { id: p.id, nombre: p.nombre, maquinas, precios };
+    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", maquinas, precios };
   });
 }
 
-async function addProveedorDB(nombre) {
-  const { data, error } = await supabase.from("proveedores").insert({ nombre }).select().single();
+const TIPOS_PROVEEDOR = ["Impresores", "Papelería", "Acabados", "Fletes", "Otro"];
+const TIPO_PROVEEDOR_COLOR = {
+  "Impresores": C.navy, "Papelería": C.cyan, "Acabados": "#7C4DFF", "Fletes": C.coral, "Otro": C.muted,
+};
+
+async function addProveedorDB(nombre, tipo) {
+  const { data, error } = await supabase.from("proveedores").insert({ nombre, tipo: tipo || "Otro" }).select().single();
   if (error) { console.error(error); return null; }
   return data;
+}
+
+async function updateProveedorTipoDB(id, tipo) {
+  const { error } = await supabase.from("proveedores").update({ tipo }).eq("id", id);
+  if (error) console.error(error);
 }
 
 async function deleteProveedorDB(id) {
@@ -638,6 +648,8 @@ function AdminProveedores() {
   const [loading, setLoading]         = useState(true);
   const [editingMachine, setEditingMachine] = useState(null);
   const [newProvNombre, setNewProvNombre]   = useState("");
+  const [newProvTipo, setNewProvTipo]       = useState(TIPOS_PROVEEDOR[0]);
+  const [filtroTipo, setFiltroTipo]         = useState("Todos");
   const [expanded, setExpanded]   = useState({});   // { id: 'maquinas'|'precios'|false }
 
   const recargar = async () => { setProveedores(await loadProveedoresDB()); setLoading(false); };
@@ -646,10 +658,12 @@ function AdminProveedores() {
 
   const addProveedor = async () => {
     if (!newProvNombre.trim()) return;
-    const creado = await addProveedorDB(newProvNombre.trim());
+    const creado = await addProveedorDB(newProvNombre.trim(), newProvTipo);
     setNewProvNombre("");
     if (creado) await recargar();
   };
+
+  const cambiarTipo = async (id, tipo) => { await updateProveedorTipoDB(id, tipo); await recargar(); };
 
   const deleteProveedor = async (id) => { await deleteProveedorDB(id); await recargar(); };
 
@@ -679,13 +693,31 @@ function AdminProveedores() {
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 12 }}>
           Proveedores registrados
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input value={newProvNombre} onChange={e => setNewProvNombre(e.target.value)}
             onKeyDown={e => e.key === "Enter" && addProveedor()}
-            placeholder="Nombre del proveedor…" style={{ ...inputStyle, flex: 1 }} />
+            placeholder="Nombre del proveedor…" style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
+          <select value={newProvTipo} onChange={e => setNewProvTipo(e.target.value)}
+            style={{ ...inputStyle, width: 150, appearance: "none" }}>
+            {TIPOS_PROVEEDOR.map(t => <option key={t}>{t}</option>)}
+          </select>
           <button onClick={addProveedor} style={btn(C.cyan)}>+ Agregar</button>
         </div>
       </div>
+
+      {/* Filtro por tipo */}
+      {proveedores.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+          {["Todos", ...TIPOS_PROVEEDOR].map(t => (
+            <button key={t} onClick={() => setFiltroTipo(t)} style={{
+              background: filtroTipo === t ? (TIPO_PROVEEDOR_COLOR[t] || C.navy) : C.bg,
+              color: filtroTipo === t ? "#fff" : C.muted,
+              border: `1.5px solid ${filtroTipo === t ? (TIPO_PROVEEDOR_COLOR[t] || C.navy) : C.border}`,
+              borderRadius: 20, padding: "5px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+            }}>{t}</button>
+          ))}
+        </div>
+      )}
 
       {proveedores.length === 0 && (
         <div style={{ textAlign: "center", color: C.muted, fontSize: 13, padding: "20px 0" }}>
@@ -693,7 +725,13 @@ function AdminProveedores() {
         </div>
       )}
 
-      {proveedores.map(prov => {
+      {proveedores.length > 0 && proveedores.filter(p => filtroTipo === "Todos" || p.tipo === filtroTipo).length === 0 && (
+        <div style={{ textAlign: "center", color: C.muted, fontSize: 13, padding: "20px 0" }}>
+          Sin proveedores de tipo "{filtroTipo}".
+        </div>
+      )}
+
+      {proveedores.filter(p => filtroTipo === "Todos" || p.tipo === filtroTipo).map(prov => {
         const preciosConDatos = Object.values(prov.precios || {}).filter(d => parseFloat(d?.precio_millar) > 0).length;
         const maqCount = prov.maquinas?.length ?? 0;
 
@@ -702,7 +740,16 @@ function AdminProveedores() {
             {/* Header */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
               <div>
-                <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: C.navy }}>{prov.nombre}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: C.navy }}>{prov.nombre}</div>
+                  <select value={prov.tipo || "Otro"} onChange={e => cambiarTipo(prov.id, e.target.value)}
+                    style={{
+                      background: TIPO_PROVEEDOR_COLOR[prov.tipo] || C.muted, color: "#fff", border: "none",
+                      borderRadius: 20, padding: "2px 10px", fontSize: 10, fontWeight: 700, cursor: "pointer", appearance: "none",
+                    }}>
+                    {TIPOS_PROVEEDOR.map(t => <option key={t} value={t} style={{ color: C.text, background: C.card }}>{t}</option>)}
+                  </select>
+                </div>
                 <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
                   {maqCount === 0 ? "Sin máquinas" : `${maqCount} máquina${maqCount > 1 ? "s" : ""}`}
                   {preciosConDatos > 0 && <span style={{ marginLeft: 8, color: C.green }}>· {preciosConDatos} proceso{preciosConDatos > 1 ? "s" : ""} con precio</span>}
