@@ -1,4 +1,13 @@
 import { useState, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+// ─── Cliente Supabase ────────────────────────────────────────────────────────
+// Toma las variables de entorno del proyecto en Vercel (prefijo VITE_ si usas Vite;
+// cambia a import.meta.env / process.env según tu bundler).
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
+);
 
 // ─── Paleta Mr. Blue ─────────────────────────────────────────────────────────
 const C = {
@@ -404,20 +413,127 @@ function FichaPrecios({ prov, onSave }) {
   );
 }
 
-// ── Función para registrar precio recibido en historial ──────────────────────
-async function registrarPrecioEnFicha(proveedorId, procesoKey, precio, qty, fecha) {
-  const proveedores = await storageGet("proveedores_db") || [];
-  const updated = proveedores.map(p => {
-    if (p.id !== proveedorId) return p;
-    const precios = { ...p.precios } || {};
-    const proceso = precios[procesoKey] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
-    const historial = [...(proceso.historial || []), { precio, fecha: fecha || new Date().toISOString(), qty }];
-    // Actualiza también el precio_millar con el más reciente
-    precios[procesoKey] = { ...proceso, precio_millar: precio, historial };
-    return { ...p, precios };
+// ── Capa de datos: Proveedores, Máquinas y Tarifas (Supabase) ────────────────
+// Reconstruye la misma forma que usaba proveedores_db en window.storage:
+//   [{ id, nombre, maquinas:[...], precios:{ [clave]: {precio_millar, rango_min, rango_max, notas, historial:[]} } }]
+// para no tener que tocar los componentes que ya consumen ese shape.
+
+let _servicioIdCache = null; // { [clave]: uuid } — evita ir y venir a Supabase en cada guardado
+async function getServicioId(clave) {
+  if (!_servicioIdCache) {
+    const { data, error } = await supabase.from("servicios_catalogo").select("id, clave");
+    if (error) { console.error(error); return null; }
+    _servicioIdCache = Object.fromEntries((data || []).filter(s => s.clave).map(s => [s.clave, s.id]));
+  }
+  return _servicioIdCache[clave] || null;
+}
+
+async function loadProveedoresDB() {
+  const { data: provs, error: e1 } = await supabase
+    .from("proveedores").select("id, nombre").order("nombre");
+  if (e1) { console.error(e1); return []; }
+
+  const { data: maqs } = await supabase.from("maquinas").select("*");
+  const { data: tarifas } = await supabase
+    .from("tarifas")
+    .select("proveedor_id, precio, notas_precio, tiraje_min, tiraje_max, qty_referencia, created_at, servicio:servicios_catalogo(clave)")
+    .order("created_at", { ascending: true });
+
+  return (provs || []).map(p => {
+    const maquinas = (maqs || [])
+      .filter(m => m.proveedor_id === p.id)
+      .map(m => ({
+        id: m.id, nombre: m.nombre, tipo: m.tipo,
+        minW: m.min_w ?? "", minH: m.min_h ?? "",
+        maxW: m.max_w ?? "", maxH: m.max_h ?? "",
+        colores: m.colores || [], tiraje_minimo: m.tiraje_minimo ?? "", notas: m.notas || "",
+      }));
+
+    const precios = {};
+    PROCESOS_PROVEEDOR.forEach(pp => {
+      precios[pp.key] = { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
+    });
+    (tarifas || []).filter(t => t.proveedor_id === p.id).forEach(t => {
+      const key = t.servicio?.clave;
+      if (!key || !precios[key]) return;
+      precios[key].historial.push({ precio: t.precio, fecha: t.created_at, qty: t.qty_referencia });
+      // Como viene ordenado asc por fecha, el último que se escribe queda como el vigente
+      precios[key].precio_millar = t.precio;
+      precios[key].rango_min = t.tiraje_min ?? "";
+      precios[key].rango_max = t.tiraje_max ?? "";
+      precios[key].notas = t.notas_precio || "";
+    });
+
+    return { id: p.id, nombre: p.nombre, maquinas, precios };
   });
-  await storageSet("proveedores_db", updated);
-  return updated;
+}
+
+async function addProveedorDB(nombre) {
+  const { data, error } = await supabase.from("proveedores").insert({ nombre }).select().single();
+  if (error) { console.error(error); return null; }
+  return data;
+}
+
+async function deleteProveedorDB(id) {
+  const { error } = await supabase.from("proveedores").delete().eq("id", id);
+  if (error) console.error(error);
+}
+
+async function saveMachineDB(provId, machine) {
+  const row = {
+    id: machine.id, proveedor_id: provId, nombre: machine.nombre, tipo: machine.tipo,
+    min_w: machine.minW || null, min_h: machine.minH || null,
+    max_w: machine.maxW || null, max_h: machine.maxH || null,
+    colores: machine.colores, tiraje_minimo: machine.tiraje_minimo || null, notas: machine.notas,
+  };
+  const { error } = await supabase.from("maquinas").upsert(row);
+  if (error) console.error(error);
+}
+
+async function deleteMachineDB(machineId) {
+  const { error } = await supabase.from("maquinas").delete().eq("id", machineId);
+  if (error) console.error(error);
+}
+
+// Guarda solo los precios que realmente cambiaron respecto a `previos`, insertando
+// una fila nueva en `tarifas` por cada uno (así se conserva el historial completo).
+async function savePreciosDB(provId, precios, previos) {
+  const rows = [];
+  for (const key of Object.keys(precios)) {
+    const d = precios[key];
+    const prev = previos?.[key];
+    const sinValor = d.precio_millar === "" || d.precio_millar == null;
+    if (sinValor) continue;
+    const cambio = !prev || String(prev.precio_millar) !== String(d.precio_millar)
+      || String(prev.rango_min) !== String(d.rango_min)
+      || String(prev.rango_max) !== String(d.rango_max)
+      || String(prev.notas) !== String(d.notas);
+    if (!cambio) continue;
+
+    const servicio_id = await getServicioId(key);
+    if (!servicio_id) continue;
+    rows.push({
+      proveedor_id: provId, servicio_id,
+      precio: parseFloat(d.precio_millar),
+      tiraje_min: d.rango_min || null, tiraje_max: d.rango_max || null,
+      notas_precio: d.notas || null,
+    });
+  }
+  if (rows.length) {
+    const { error } = await supabase.from("tarifas").insert(rows);
+    if (error) console.error(error);
+  }
+}
+
+async function registrarPrecioEnFicha(proveedorId, procesoKey, precio, qty, fecha) {
+  const servicio_id = await getServicioId(procesoKey);
+  if (!servicio_id) return;
+  const { error } = await supabase.from("tarifas").insert({
+    proveedor_id: proveedorId, servicio_id,
+    precio: parseFloat(precio),
+    qty_referencia: qty ? parseInt(qty) : null,
+  });
+  if (error) console.error(error);
 }
 
 const emptyMachine = () => ({
@@ -515,36 +631,31 @@ function AdminProveedores() {
   const [newProvNombre, setNewProvNombre]   = useState("");
   const [expanded, setExpanded]   = useState({});   // { id: 'maquinas'|'precios'|false }
 
-  useEffect(() => {
-    storageGet("proveedores_db").then(d => { setProveedores(d || []); setLoading(false); });
-  }, []);
+  const recargar = async () => { setProveedores(await loadProveedoresDB()); setLoading(false); };
 
-  const save = async (list) => { setProveedores(list); await storageSet("proveedores_db", list); };
+  useEffect(() => { recargar(); }, []);
 
   const addProveedor = async () => {
     if (!newProvNombre.trim()) return;
-    await save([...proveedores, { id: crypto.randomUUID(), nombre: newProvNombre.trim(), maquinas: [], precios: {} }]);
+    const creado = await addProveedorDB(newProvNombre.trim());
     setNewProvNombre("");
+    if (creado) await recargar();
   };
 
-  const deleteProveedor = (id) => save(proveedores.filter(p => p.id !== id));
+  const deleteProveedor = async (id) => { await deleteProveedorDB(id); await recargar(); };
 
   const saveMachine = async (provId, machine) => {
-    const list = proveedores.map(p => {
-      if (p.id !== provId) return p;
-      const exists = p.maquinas.find(m => m.id === machine.id);
-      const maquinas = exists ? p.maquinas.map(m => m.id === machine.id ? machine : m) : [...p.maquinas, machine];
-      return { ...p, maquinas };
-    });
-    await save(list);
+    await saveMachineDB(provId, machine.id ? machine : { ...machine, id: crypto.randomUUID() });
     setEditingMachine(null);
+    await recargar();
   };
 
-  const deleteMachine = (provId, machineId) =>
-    save(proveedores.map(p => p.id !== provId ? p : { ...p, maquinas: p.maquinas.filter(m => m.id !== machineId) }));
+  const deleteMachine = async (provId, machineId) => { await deleteMachineDB(machineId); await recargar(); };
 
   const savePrecios = async (provActualizado) => {
-    await save(proveedores.map(p => p.id === provActualizado.id ? provActualizado : p));
+    const anterior = proveedores.find(p => p.id === provActualizado.id);
+    await savePreciosDB(provActualizado.id, provActualizado.precios, anterior?.precios);
+    await recargar();
   };
 
   const toggleSection = (provId, section) =>
@@ -704,7 +815,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [selectedMachineId, setSelectedMachineId] = useState("");
 
   useEffect(() => {
-    storageGet("proveedores_db").then(d => setProveedores(d || []));
+    loadProveedoresDB().then(setProveedores);
   }, []);
 
   const selectedProv = proveedores.find(p => p.id === selectedProvId);
@@ -951,8 +1062,8 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
 
   const guardar = async () => {
     setGuardando(true);
-    // Buscar id del proveedor en proveedores_db por nombre
-    const proveedoresDb = await storageGet("proveedores_db") || [];
+    // Buscar id del proveedor en Supabase por nombre
+    const proveedoresDb = await loadProveedoresDB();
     const provMatch = proveedoresDb.find(p => p.nombre === sol.proveedor);
 
     if (provMatch) {
