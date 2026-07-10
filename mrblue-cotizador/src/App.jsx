@@ -330,6 +330,33 @@ function FichaPrecios({ prov, onSave }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  // ── Importar CSV: llena los precios de golpe, comparando por nombre con el catálogo.
+  // Formato esperado: nombre,precio (una fila por servicio). No se guarda hasta darle "Guardar precios".
+  const [importInfo, setImportInfo] = useState(null); // { matched, total }
+  const onImportCsv = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const filas = parseCsvPrecios(String(ev.target.result || ""));
+      let matched = 0;
+      setPrecios(prev => {
+        const next = { ...prev };
+        filas.forEach(({ nombre, precio }) => {
+          const s = catalogo.find(c => c.nombre.trim().toLowerCase() === nombre.trim().toLowerCase());
+          if (!s) return;
+          matched++;
+          next[s.id] = { ...(next[s.id] || { rango_min: "", rango_max: "", notas: "", historial: [] }), precio_millar: precio };
+        });
+        return next;
+      });
+      setImportInfo({ matched, total: filas.length });
+      setTimeout(() => setImportInfo(null), 6000);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
   const categorias = [...new Set(catalogo.map(s => s.categoria))];
 
   if (loadingCat) return <div style={{ color: C.muted, padding: "10px 4px", fontSize: 12 }}>Cargando catálogo…</div>;
@@ -344,6 +371,19 @@ function FichaPrecios({ prov, onSave }) {
 
   return (
     <div style={{ marginTop: 14 }}>
+      {/* Importar CSV con nombre,precio — llena los campos de abajo sin guardar todavía */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <label style={{ ...btn(C.muted), background: "none", color: C.muted, border: `1.5px solid ${C.border}`, cursor: "pointer" }}>
+          📥 Importar CSV (nombre,precio)
+          <input type="file" accept=".csv" onChange={onImportCsv} style={{ display: "none" }} />
+        </label>
+        {importInfo && (
+          <span style={{ fontSize: 11, color: importInfo.matched > 0 ? C.green : C.red, fontWeight: 700 }}>
+            {importInfo.matched} de {importInfo.total} filas coincidieron con el catálogo{importInfo.matched < importInfo.total ? " (revisa nombres exactos para las demás)" : ""}
+          </span>
+        )}
+      </div>
+
       {/* Tabs de categoría — vienen directo del catálogo en Supabase */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {categorias.map(cat => (
@@ -517,6 +557,61 @@ async function deleteMachineDB(machineId) {
   if (error) console.error(error);
 }
 
+// ── Archivos de proveedor (listas de precios en PDF/Excel) ───────────────────
+// Usa el bucket público "proveedor-archivos" en Supabase Storage.
+const BUCKET_ARCHIVOS = "proveedor-archivos";
+
+async function uploadArchivoProveedor(provId, file) {
+  const path = `${provId}/${Date.now()}_${file.name}`;
+  const { error: upErr } = await supabase.storage.from(BUCKET_ARCHIVOS).upload(path, file);
+  if (upErr) { console.error(upErr); return null; }
+  const { data: pub } = supabase.storage.from(BUCKET_ARCHIVOS).getPublicUrl(path);
+  const { error: insErr } = await supabase.from("proveedor_archivos").insert({
+    proveedor_id: provId, nombre_archivo: file.name, url: pub.publicUrl,
+  });
+  if (insErr) { console.error(insErr); return null; }
+  return pub.publicUrl;
+}
+
+async function loadArchivosProveedor(provId) {
+  const { data, error } = await supabase
+    .from("proveedor_archivos").select("*").eq("proveedor_id", provId)
+    .order("created_at", { ascending: false });
+  if (error) { console.error(error); return []; }
+  return data || [];
+}
+
+async function deleteArchivoProveedor(archivoId, url) {
+  // Intenta borrar el objeto del storage a partir de la URL pública; si falla, igual borra el registro.
+  try {
+    const marker = `/${BUCKET_ARCHIVOS}/`;
+    const idx = url.indexOf(marker);
+    if (idx >= 0) {
+      const path = url.slice(idx + marker.length);
+      await supabase.storage.from(BUCKET_ARCHIVOS).remove([path]);
+    }
+  } catch (e) { console.error(e); }
+  const { error } = await supabase.from("proveedor_archivos").delete().eq("id", archivoId);
+  if (error) console.error(error);
+}
+
+// Parser CSV simple: espera columnas "nombre,precio" (con encabezado o sin él).
+// No requiere librerías externas — suficiente para listas simples exportadas de Excel.
+function parseCsvPrecios(text) {
+  const lineas = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const filas = [];
+  for (let linea of lineas) {
+    const cols = linea.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+    if (cols.length < 2) continue;
+    const nombre = cols[0];
+    const precio = parseFloat(cols[1].replace(/[^0-9.]/g, ""));
+    if (!nombre || Number.isNaN(precio)) continue;
+    if (/^(nombre|servicio|producto)$/i.test(nombre)) continue; // salta encabezado
+    filas.push({ nombre, precio });
+  }
+  return filas;
+}
+
 // Guarda solo los precios que realmente cambiaron respecto a `previos`, insertando
 // una fila nueva en `tarifas` por cada uno (así se conserva el historial completo).
 // `precios` viene indexado por servicio_id real, así que se inserta directo.
@@ -643,6 +738,76 @@ function MachineForm({ machine, onChange, onSave, onCancel }) {
   );
 }
 
+// ── Archivos de un proveedor: subir PDF/Excel de su lista de precios y verla después ──
+function ArchivosProveedor({ provId }) {
+  const [archivos, setArchivos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [subiendo, setSubiendo] = useState(false);
+  const [error, setError] = useState("");
+
+  const recargar = async () => { setArchivos(await loadArchivosProveedor(provId)); setLoading(false); };
+  useEffect(() => { recargar(); }, [provId]);
+
+  const onFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(""); setSubiendo(true);
+    const url = await uploadArchivoProveedor(provId, file);
+    setSubiendo(false);
+    e.target.value = "";
+    if (!url) { setError("No se pudo subir el archivo. Revisa que el bucket 'proveedor-archivos' exista y sea público."); return; }
+    await recargar();
+  };
+
+  const borrar = async (id, url) => { await deleteArchivoProveedor(id, url); await recargar(); };
+
+  const extIcon = (nombre) => {
+    const ext = (nombre || "").split(".").pop()?.toLowerCase();
+    if (ext === "pdf") return "📕";
+    if (["xls", "xlsx", "csv"].includes(ext)) return "📊";
+    return "📄";
+  };
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
+        Sube la lista de precios del proveedor (PDF, Excel o CSV) para tenerla a la mano y consultarla cuando la necesites.
+      </div>
+
+      <label style={{ ...btn(subiendo ? C.muted : C.amber), display: "inline-block", cursor: subiendo ? "default" : "pointer" }}>
+        {subiendo ? "Subiendo…" : "📎 Subir archivo"}
+        <input type="file" onChange={onFileChange} disabled={subiendo}
+          accept=".pdf,.xls,.xlsx,.csv" style={{ display: "none" }} />
+      </label>
+
+      {error && <div style={{ marginTop: 8, fontSize: 12, color: C.red }}>{error}</div>}
+
+      <div style={{ marginTop: 12 }}>
+        {loading ? (
+          <div style={{ color: C.muted, fontSize: 12 }}>Cargando…</div>
+        ) : archivos.length === 0 ? (
+          <div style={{ color: C.muted, fontSize: 12 }}>Sin archivos subidos todavía.</div>
+        ) : (
+          archivos.map(a => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+              background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+              <a href={a.url} target="_blank" rel="noreferrer" style={{ color: C.navy, fontSize: 13, fontWeight: 600, textDecoration: "none", flex: 1 }}>
+                {extIcon(a.nombre_archivo)} {a.nombre_archivo}
+              </a>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 11, color: C.muted }}>{new Date(a.created_at).toLocaleDateString("es-MX")}</span>
+                <button onClick={() => borrar(a.id, a.url)}
+                  style={{ background: "none", border: "none", color: C.red, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✕</button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function AdminProveedores() {
   const [proveedores, setProveedores] = useState([]);
   const [loading, setLoading]         = useState(true);
@@ -768,6 +933,12 @@ function AdminProveedores() {
                     border: `1.5px solid ${expanded[prov.id] === "precios" ? C.cyan : C.border}` }}>
                   💰 Precios
                 </button>
+                <button onClick={() => toggleSection(prov.id, "archivos")}
+                  style={{ ...btn(expanded[prov.id] === "archivos" ? C.amber : C.bg),
+                    color: expanded[prov.id] === "archivos" ? "#fff" : C.muted,
+                    border: `1.5px solid ${expanded[prov.id] === "archivos" ? C.amber : C.border}` }}>
+                  📎 Archivos
+                </button>
                 <button onClick={() => deleteProveedor(prov.id)}
                   style={{ ...btn(C.red), background: "none", color: C.red, border: `1.5px solid ${C.red}` }}>
                   Eliminar
@@ -827,6 +998,11 @@ function AdminProveedores() {
             {/* Sección: Precios por proceso */}
             {expanded[prov.id] === "precios" && (
               <FichaPrecios prov={prov} onSave={savePrecios} />
+            )}
+
+            {/* Sección: Archivos (listas de precios en PDF/Excel/CSV) */}
+            {expanded[prov.id] === "archivos" && (
+              <ArchivosProveedor provId={prov.id} />
             )}
           </div>
         );
