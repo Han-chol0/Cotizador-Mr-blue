@@ -1285,6 +1285,15 @@ function Cotizador({ cotizacion, calcData }) {
   const serviciosDisponibles = (cats) =>
     serviciosDe(cats).filter(s => provsConPrecio(s.id).length > 0);
 
+  // Etiqueta para dropdowns: nombre + proveedor más barato + precio + cuántos más lo venden
+  const etiquetaServicio = (s) => {
+    const provs = provsConPrecio(s.id);
+    if (!provs.length) return s.nombre;
+    const top = provs[0];
+    const extra = provs.length > 1 ? ` (+${provs.length - 1} más)` : "";
+    return `${s.nombre} — ${top.nombre} $${top.precio.toLocaleString("es-MX")}${extra}`;
+  };
+
   // Al elegir servicio, autoselecciona el proveedor más barato
   const elegirServicio = (servicioId, setServ, setProv) => {
     setServ(servicioId);
@@ -1353,7 +1362,7 @@ function Cotizador({ cotizacion, calcData }) {
         <select value={servicioId} onChange={e => elegirServicio(e.target.value, setServ, setProv)}
           style={{ ...inputStyle, appearance: "none", marginBottom: 8 }}>
           <option value="">— Selecciona {titulo.toLowerCase()} ({serviciosDisponibles(cats).length} disponibles) —</option>
-          {serviciosDisponibles(cats).map(s => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+          {serviciosDisponibles(cats).map(s => <option key={s.id} value={s.id}>{etiquetaServicio(s)}</option>)}
         </select>
 
         {serviciosDisponibles(cats).length === 0 && (
@@ -1449,7 +1458,7 @@ function Cotizador({ cotizacion, calcData }) {
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
                   <option value="">— Servicio —</option>
                   {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido"]).map(s =>
-                    <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                    <option key={s.id} value={s.id}>{etiquetaServicio(s)}</option>)}
                 </select>
                 <select value={a.provId} onChange={e => updAcabado(a.key, { provId: e.target.value })}
                   disabled={provs.length === 0}
