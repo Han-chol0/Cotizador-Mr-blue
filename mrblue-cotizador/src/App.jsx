@@ -1222,6 +1222,328 @@ function Calculadora({ onCalcDone, cotizacion }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// MÓDULO: Cotizador con precios reales de proveedores
+// ═══════════════════════════════════════════════════════════════════════════════
+// Junta la cantidad/imposición (pestaña Pliegos) con las tarifas vigentes de cada
+// proveedor (Supabase) para armar el costo y el precio de venta. El margen se
+// aplica sobre venta (precio = costo / (1 - margen)), igual que la base de Excel.
+
+function Cotizador({ cotizacion, calcData }) {
+  const [proveedores, setProveedores] = useState([]);
+  const [catalogo, setCatalogo] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  // Cantidad de piezas y pliegos necesarios (editable por si no vienen de Pliegos)
+  const qtyDefault = parseInt(calcData?.qty) || parseInt(cotizacion?.cantidad) || 0;
+  const sel = calcData?.selectedSheet;
+  const mermaPct = parseFloat(calcData?.merma) || 0;
+  const pliegosCalc = sel && qtyDefault
+    ? Math.ceil(Math.ceil(qtyDefault / sel.piecesPerSheet) * (1 + mermaPct / 100))
+    : 0;
+
+  const [qtyManual, setQtyManual] = useState("");
+  const [pliegosManual, setPliegosManual] = useState("");
+  const qty = parseInt(qtyManual) > 0 ? parseInt(qtyManual) : qtyDefault;
+  const pliegos = parseInt(pliegosManual) > 0 ? parseInt(pliegosManual) : pliegosCalc;
+
+  // Selecciones de la cotización
+  const [papelServicioId, setPapelServicioId] = useState("");
+  const [papelProvId, setPapelProvId] = useState("");
+  const [impServicioId, setImpServicioId] = useState("");
+  const [impProvId, setImpProvId] = useState("");
+  const [acabados, setAcabados] = useState([]); // [{key, servicioId, provId, base}]
+  const [flete, setFlete] = useState("");
+  const [extras, setExtras] = useState("");
+  const [margen, setMargen] = useState("35");
+
+  useEffect(() => {
+    Promise.all([loadProveedoresDB(), loadServiciosCatalogo()]).then(([p, c]) => {
+      setProveedores(p); setCatalogo(c); setLoading(false);
+    });
+  }, []);
+
+  // ── Helpers ──
+  const provsConPrecio = (servicioId) =>
+    proveedores
+      .map(p => ({ id: p.id, nombre: p.nombre, tipo: p.tipo, precio: parseFloat(p.precios?.[servicioId]?.precio_millar) }))
+      .filter(p => p.precio > 0)
+      .sort((a, b) => a.precio - b.precio);
+
+  const precioDe = (provId, servicioId) => {
+    const p = proveedores.find(x => x.id === provId);
+    const v = parseFloat(p?.precios?.[servicioId]?.precio_millar);
+    return v > 0 ? v : null;
+  };
+
+  const nombreServicio = (id) => catalogo.find(s => s.id === id)?.nombre || "—";
+  const nombreProv = (id) => proveedores.find(p => p.id === id)?.nombre || "—";
+
+  const serviciosDe = (cats) => catalogo.filter(s => cats.includes(s.categoria));
+
+  // Al elegir servicio, autoselecciona el proveedor más barato
+  const elegirServicio = (servicioId, setServ, setProv) => {
+    setServ(servicioId);
+    const provs = provsConPrecio(servicioId);
+    setProv(provs.length ? provs[0].id : "");
+  };
+
+  const addAcabado = () =>
+    setAcabados(prev => [...prev, { key: Date.now() + Math.random(), servicioId: "", provId: "", base: "piezas" }]);
+  const updAcabado = (key, patch) =>
+    setAcabados(prev => prev.map(a => a.key === key ? { ...a, ...patch } : a));
+  const delAcabado = (key) => setAcabados(prev => prev.filter(a => a.key !== key));
+
+  // ── Costos ──
+  const costoPapel = papelProvId && papelServicioId && pliegos
+    ? (pliegos / 1000) * (precioDe(papelProvId, papelServicioId) || 0) : 0;
+  const costoImp = impProvId && impServicioId && pliegos
+    ? (pliegos / 1000) * (precioDe(impProvId, impServicioId) || 0) : 0;
+  const costoAcabados = acabados.reduce((sum, a) => {
+    if (!a.servicioId || !a.provId) return sum;
+    const unidades = a.base === "pliegos" ? pliegos : qty;
+    return sum + (unidades / 1000) * (precioDe(a.provId, a.servicioId) || 0);
+  }, 0);
+  const costoFlete = parseFloat(flete) || 0;
+  const costoExtras = parseFloat(extras) || 0;
+  const costoTotal = costoPapel + costoImp + costoAcabados + costoFlete + costoExtras;
+
+  const m = Math.min(Math.max(parseFloat(margen) || 0, 0), 90) / 100;
+  const precioVenta = costoTotal > 0 ? costoTotal / (1 - m) : 0;
+  const utilidad = precioVenta - costoTotal;
+  const precioUnitario = qty > 0 ? precioVenta / qty : 0;
+  const precioMillar = precioUnitario * 1000;
+
+  const money = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const copiarDesglose = () => {
+    const lineas = [
+      ("COTIZACIÓN " + (cotizacion?.folio || "") + " · " + (cotizacion?.nombre_proyecto || "")).trim(),
+      "Cantidad: " + qty.toLocaleString("es-MX") + " pzas · Pliegos (c/merma): " + pliegos.toLocaleString("es-MX"),
+      sel ? ("Pliego: " + sel.label + " · " + sel.piecesPerSheet + " pzas/pliego") : null,
+      "",
+      papelServicioId ? ("Papel — " + nombreServicio(papelServicioId) + " (" + nombreProv(papelProvId) + "): " + money(costoPapel)) : null,
+      impServicioId ? ("Impresión — " + nombreServicio(impServicioId) + " (" + nombreProv(impProvId) + "): " + money(costoImp)) : null,
+      ...acabados.filter(a => a.servicioId && a.provId).map(a =>
+        "Acabado — " + nombreServicio(a.servicioId) + " (" + nombreProv(a.provId) + "): " + money((a.base === "pliegos" ? pliegos : qty) / 1000 * (precioDe(a.provId, a.servicioId) || 0))),
+      costoFlete ? ("Flete: " + money(costoFlete)) : null,
+      costoExtras ? ("Extras: " + money(costoExtras)) : null,
+      "",
+      "COSTO TOTAL: " + money(costoTotal),
+      "Margen: " + (m * 100).toFixed(0) + "% · Utilidad: " + money(utilidad),
+      "PRECIO DE VENTA: " + money(precioVenta),
+      "Precio unitario: " + money(precioUnitario) + " · Por millar: " + money(precioMillar),
+    ].filter(l => l !== null);
+    navigator.clipboard?.writeText(lineas.join("\n"));
+  };
+
+  // ── Sub-UI: selector servicio + proveedor con comparación de precios ──
+  const SelectorCosto = ({ titulo, cats, servicioId, provId, setServ, setProv, costo, unidadNota }) => {
+    const provs = servicioId ? provsConPrecio(servicioId) : [];
+    return (
+      <div style={{ ...cardStyle, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>{titulo}</div>
+          {costo > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costo)}</div>}
+        </div>
+        <select value={servicioId} onChange={e => elegirServicio(e.target.value, setServ, setProv)}
+          style={{ ...inputStyle, appearance: "none", marginBottom: 8 }}>
+          <option value="">— Selecciona {titulo.toLowerCase()} —</option>
+          {serviciosDe(cats).map(s => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+        </select>
+
+        {servicioId && provs.length === 0 && (
+          <div style={{ fontSize: 12, color: C.coral }}>
+            Ningún proveedor tiene precio cargado para este servicio. Cárgalo en 🏭 Proveedores → Precios.
+          </div>
+        )}
+
+        {provs.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {provs.map((p, i) => (
+              <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                background: provId === p.id ? "#EAF4FB" : C.bg, border: "1.5px solid " + (provId === p.id ? C.cyan : C.border),
+                borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+                <input type="radio" checked={provId === p.id} onChange={() => setProv(p.id)}
+                  style={{ accentColor: C.cyan }} />
+                <span style={{ flex: 1, fontWeight: 600, color: C.text }}>
+                  {p.nombre}
+                  {i === 0 && <span style={{ marginLeft: 8, background: C.green, color: "#fff", borderRadius: 10, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>MÁS BARATO</span>}
+                </span>
+                <span style={{ fontWeight: 700, color: C.navy }}>{money(p.precio)}<span style={{ fontWeight: 400, color: C.muted, fontSize: 11 }}> {unidadNota}</span></span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (loading) return <div style={{ color: C.muted, fontSize: 13, padding: 20 }}>Cargando proveedores y catálogo…</div>;
+
+  return (
+    <div>
+      {/* Datos base del proyecto */}
+      <div style={{ ...cardStyle, marginBottom: 12 }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 10 }}>
+          Datos del proyecto
+          {cotizacion?.nombre_proyecto && <span style={{ fontWeight: 400, color: C.muted, marginLeft: 8, fontSize: 12 }}>{cotizacion.nombre_proyecto}</span>}
+        </div>
+        {!sel && (
+          <div style={{ background: "#FFF9E8", border: "1.5px solid " + C.amber, borderRadius: 8, padding: "9px 12px", fontSize: 12, color: C.text, marginBottom: 10 }}>
+            💡 Aún no hay imposición seleccionada en 📐 Pliegos. Puedes capturar los pliegos manualmente abajo, o calcularlos primero.
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
+          <div>
+            <label style={labelStyle}>Cantidad de piezas</label>
+            <input type="number" value={qtyManual || (qtyDefault || "")} onChange={e => setQtyManual(e.target.value)}
+              placeholder="Ej: 10,000" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Pliegos necesarios (con merma)</label>
+            <input type="number" value={pliegosManual || (pliegosCalc || "")} onChange={e => setPliegosManual(e.target.value)}
+              placeholder="Ej: 1,250" style={inputStyle} />
+          </div>
+        </div>
+        {sel && (
+          <div style={{ marginTop: 8, fontSize: 12, color: C.muted }}>
+            Pliego {sel.label} · {sel.piecesPerSheet} pzas/pliego · merma {mermaPct}%
+          </div>
+        )}
+      </div>
+
+      <SelectorCosto titulo="Papel" cats={["papel"]}
+        servicioId={papelServicioId} provId={papelProvId}
+        setServ={setPapelServicioId} setProv={setPapelProvId}
+        costo={costoPapel} unidadNota="/millar pliegos" />
+
+      <SelectorCosto titulo="Impresión" cats={["impresion"]}
+        servicioId={impServicioId} provId={impProvId}
+        setServ={setImpServicioId} setProv={setImpProvId}
+        costo={costoImp} unidadNota="/millar pliegos" />
+
+      {/* Acabados (múltiples) */}
+      <div style={{ ...cardStyle, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>Acabados</div>
+          {costoAcabados > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costoAcabados)}</div>}
+        </div>
+        {acabados.map(a => {
+          const provs = a.servicioId ? provsConPrecio(a.servicioId) : [];
+          const costoA = a.servicioId && a.provId
+            ? ((a.base === "pliegos" ? pliegos : qty) / 1000) * (precioDe(a.provId, a.servicioId) || 0) : 0;
+          return (
+            <div key={a.key} style={{ background: C.bg, border: "1.5px solid " + C.border, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
+                <select value={a.servicioId}
+                  onChange={e => {
+                    const sid = e.target.value;
+                    const ps = provsConPrecio(sid);
+                    updAcabado(a.key, { servicioId: sid, provId: ps.length ? ps[0].id : "" });
+                  }}
+                  style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
+                  <option value="">— Servicio —</option>
+                  {serviciosDe(["acabado", "otro", "magnetico", "sustrato_rigido"]).map(s =>
+                    <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                </select>
+                <select value={a.provId} onChange={e => updAcabado(a.key, { provId: e.target.value })}
+                  disabled={provs.length === 0}
+                  style={{ ...inputStyle, appearance: "none", fontSize: 12, opacity: provs.length === 0 ? 0.5 : 1 }}>
+                  <option value="">— Proveedor —</option>
+                  {provs.map((p, i) => <option key={p.id} value={p.id}>{p.nombre} · {money(p.precio)}{i === 0 ? " ⭐" : ""}</option>)}
+                </select>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <select value={a.base} onChange={e => updAcabado(a.key, { base: e.target.value })}
+                  style={{ ...inputStyle, appearance: "none", fontSize: 11, width: 190, padding: "5px 8px" }}>
+                  <option value="piezas">Por millar de piezas</option>
+                  <option value="pliegos">Por millar de pliegos</option>
+                </select>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {costoA > 0 && <span style={{ fontWeight: 700, fontSize: 13, color: C.navy }}>{money(costoA)}</span>}
+                  <button onClick={() => delAcabado(a.key)}
+                    style={{ background: "none", border: "none", color: C.red, fontWeight: 700, cursor: "pointer", fontSize: 14 }}>✕</button>
+                </div>
+              </div>
+              {a.servicioId && provs.length === 0 && (
+                <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>Sin proveedores con precio para este servicio.</div>
+              )}
+            </div>
+          );
+        })}
+        <button onClick={addAcabado} style={{ ...btn(C.bg), color: C.navy, border: "1.5px dashed " + C.border }}>
+          + Agregar acabado
+        </button>
+      </div>
+
+      {/* Flete, extras y margen */}
+      <div style={{ ...cardStyle, marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px" }}>
+          <div>
+            <label style={labelStyle}>Flete ($)</label>
+            <input type="number" value={flete} onChange={e => setFlete(e.target.value)} placeholder="0.00" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Extras ($)</label>
+            <input type="number" value={extras} onChange={e => setExtras(e.target.value)} placeholder="0.00" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Margen (%)</label>
+            <input type="number" value={margen} onChange={e => setMargen(e.target.value)} placeholder="35" style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ marginTop: 6, fontSize: 11, color: C.muted }}>
+          El margen se aplica sobre el precio de venta: precio = costo ÷ (1 − margen).
+        </div>
+      </div>
+
+      {/* Desglose y resultado */}
+      <div style={{ ...cardStyle, background: C.navy, marginBottom: 12 }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: "#fff", marginBottom: 12 }}>
+          Desglose de costos
+        </div>
+        {[
+          papelServicioId && { label: "Papel · " + nombreServicio(papelServicioId), prov: nombreProv(papelProvId), v: costoPapel },
+          impServicioId && { label: "Impresión · " + nombreServicio(impServicioId), prov: nombreProv(impProvId), v: costoImp },
+          ...acabados.filter(a => a.servicioId && a.provId).map(a => ({
+            label: "Acabado · " + nombreServicio(a.servicioId), prov: nombreProv(a.provId),
+            v: ((a.base === "pliegos" ? pliegos : qty) / 1000) * (precioDe(a.provId, a.servicioId) || 0),
+          })),
+          costoFlete > 0 && { label: "Flete", prov: "", v: costoFlete },
+          costoExtras > 0 && { label: "Extras", prov: "", v: costoExtras },
+        ].filter(Boolean).map((r, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#D7E7F2", padding: "5px 0", borderBottom: "1px solid rgba(255,255,255,0.12)" }}>
+            <span>{r.label}{r.prov && <span style={{ color: "#8BBDD6", fontSize: 11 }}> · {r.prov}</span>}</span>
+            <span style={{ fontWeight: 600 }}>{money(r.v)}</span>
+          </div>
+        ))}
+
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, color: "#fff", fontWeight: 700, padding: "10px 0 4px" }}>
+          <span>COSTO TOTAL</span><span>{money(costoTotal)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#8BBDD6", padding: "2px 0" }}>
+          <span>Utilidad ({(m * 100).toFixed(0)}%)</span><span>{money(utilidad)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, background: C.cyan, borderRadius: 8, padding: "12px 14px" }}>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 14 }}>PRECIO DE VENTA</span>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 18 }}>{money(precioVenta)}</span>
+        </div>
+        {qty > 0 && precioVenta > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#D7E7F2", marginTop: 8 }}>
+            <span>Unitario: <strong>{money(precioUnitario)}</strong></span>
+            <span>Por millar: <strong>{money(precioMillar)}</strong></span>
+          </div>
+        )}
+      </div>
+
+      <button onClick={copiarDesglose} disabled={costoTotal <= 0} style={btn(costoTotal > 0 ? C.coral : C.muted, true)}>
+        📋 Copiar desglose
+      </button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Badge de estado
 // ═══════════════════════════════════════════════════════════════════════════════
 function StatusBadge({ status }) {
@@ -2532,6 +2854,7 @@ export default function App() {
   const tabs = [
     { key: "cotizacion", label: "📋 Cotización"       },
     { key: "calc",       label: "📐 Pliegos"          },
+    { key: "cotizar",    label: "💵 Cotizar"          },
     { key: "envio",      label: "✉ Enviar solicitud"  },
     { key: "seg",        label: "📋 Seguimiento"       },
     { key: "admin",      label: "🏭 Proveedores"       },
@@ -2590,12 +2913,18 @@ export default function App() {
           <>
             <Calculadora onCalcDone={setCalcData} cotizacion={cotizacion} />
             {calcData && (
-              <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), marginTop: 4 }}>
-                Continuar → Enviar solicitud a proveedores
-              </button>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                <button onClick={() => setTab("cotizar")} style={{ ...btn(C.cyan, true), flex: 1, minWidth: 200 }}>
+                  Continuar → 💵 Cotizar con proveedores
+                </button>
+                <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), flex: 1, minWidth: 200 }}>
+                  Continuar → Enviar solicitud
+                </button>
+              </div>
             )}
           </>
         )}
+        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} />}
         {tab === "envio"     && <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} />}
         {tab === "seg"       && <Seguimiento />}
         {tab === "admin"     && <AdminProveedores />}
