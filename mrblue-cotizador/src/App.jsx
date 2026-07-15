@@ -1280,6 +1280,11 @@ function Cotizador({ cotizacion, calcData }) {
 
   const serviciosDe = (cats) => catalogo.filter(s => cats.includes(s.categoria));
 
+  // Solo servicios que al menos un proveedor realmente vende (tiene precio cargado).
+  // Así el cotizador nunca ofrece papeles/procesos sin proveedor detrás.
+  const serviciosDisponibles = (cats) =>
+    serviciosDe(cats).filter(s => provsConPrecio(s.id).length > 0);
+
   // Al elegir servicio, autoselecciona el proveedor más barato
   const elegirServicio = (servicioId, setServ, setProv) => {
     setServ(servicioId);
@@ -1347,13 +1352,13 @@ function Cotizador({ cotizacion, calcData }) {
         </div>
         <select value={servicioId} onChange={e => elegirServicio(e.target.value, setServ, setProv)}
           style={{ ...inputStyle, appearance: "none", marginBottom: 8 }}>
-          <option value="">— Selecciona {titulo.toLowerCase()} —</option>
-          {serviciosDe(cats).map(s => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+          <option value="">— Selecciona {titulo.toLowerCase()} ({serviciosDisponibles(cats).length} disponibles) —</option>
+          {serviciosDisponibles(cats).map(s => <option key={s.id} value={s.id}>{s.nombre}</option>)}
         </select>
 
-        {servicioId && provs.length === 0 && (
+        {serviciosDisponibles(cats).length === 0 && (
           <div style={{ fontSize: 12, color: C.coral }}>
-            Ningún proveedor tiene precio cargado para este servicio. Cárgalo en 🏭 Proveedores → Precios.
+            Ningún proveedor tiene precios de {titulo.toLowerCase()} cargados todavía. Cárgalos en 🏭 Proveedores → Precios.
           </div>
         )}
 
@@ -1443,7 +1448,7 @@ function Cotizador({ cotizacion, calcData }) {
                   }}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
                   <option value="">— Servicio —</option>
-                  {serviciosDe(["acabado", "otro", "magnetico", "sustrato_rigido"]).map(s =>
+                  {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido"]).map(s =>
                     <option key={s.id} value={s.id}>{s.nombre}</option>)}
                 </select>
                 <select value={a.provId} onChange={e => updAcabado(a.key, { provId: e.target.value })}
