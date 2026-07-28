@@ -606,7 +606,7 @@ function FichaPrecios({ prov, onSave }) {
               {esFijo && <span style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginLeft: 6 }}>(costo único por proyecto)</span>}
             </div>
 
-            {prov.maquinas && prov.maquinas.length > 1 && !esFijo && (
+            {prov.maquinas && prov.maquinas.length > 1 && (
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap", padding: "4px 12px 8px" }}>
                 <button onClick={() => setMaquinaSelPorServicio(prev => ({ ...prev, [s.id]: null }))}
                   style={{ fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 20, cursor: "pointer",
