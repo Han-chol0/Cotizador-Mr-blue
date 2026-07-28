@@ -460,14 +460,20 @@ function FichaPrecios({ prov, onSave }) {
   }, [prov.id]);
 
   const updateEscalon = (sid, idx, field, val) =>
-    setPrecios(prev => ({
-      ...prev,
-      [sid]: { ...prev[sid], escalones: prev[sid].escalones.map((e, i) => i === idx ? { ...e, [field]: val } : e) },
-    }));
+    setPrecios(prev => {
+      const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
+      return { ...prev, [sid]: { ...base, escalones: base.escalones.map((e, i) => i === idx ? { ...e, [field]: val } : e) } };
+    });
   const addEscalon = (sid) =>
-    setPrecios(prev => ({ ...prev, [sid]: { ...prev[sid], escalones: [...prev[sid].escalones, nuevoEscalon()] } }));
+    setPrecios(prev => {
+      const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
+      return { ...prev, [sid]: { ...base, escalones: [...base.escalones, nuevoEscalon()] } };
+    });
   const removeEscalon = (sid, idx) =>
-    setPrecios(prev => ({ ...prev, [sid]: { ...prev[sid], escalones: prev[sid].escalones.filter((_, i) => i !== idx) } }));
+    setPrecios(prev => {
+      const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
+      return { ...prev, [sid]: { ...base, escalones: base.escalones.filter((_, i) => i !== idx) } };
+    });
 
   const guardar = () => {
     onSave({ ...prov, precios });
