@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── Cliente Supabase ────────────────────────────────────────────────────────
@@ -97,6 +97,8 @@ function mapClickUpToCot(raw) {
     tamano_extendido:      toStr(raw.tamano_extendido || raw.size_extendido) || "",
     tamano_final:          toStr(raw.tamano_final || raw.size_final)     || "",
     num_tintas:            toStr(raw.num_tintas || raw.tintas)           || "",
+    tintas_frente:         toStr(raw.tintas_frente)                      || "",
+    tintas_vuelta:         toStr(raw.tintas_vuelta)                      || "",
     lleva_pantone:         toBool(raw.lleva_pantone || raw.pantone),
     pantones:              toStr(raw.pantones)                           || "",
     son_promocionales:     toBool(raw.son_promocionales || raw.promocionales),
@@ -286,6 +288,83 @@ function colorForCategoria(categorias, cat) {
   return idx >= 0 ? PALETA_CATEGORIAS[idx % PALETA_CATEGORIAS.length] : C.muted;
 }
 
+const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "" });
+
+// Elige el escalón de precio que corresponde a una cantidad dada.
+// escalones: [{ tiraje_min, tiraje_max, precio }], tiraje_max vacío/null = "en adelante".
+// Formatea horas decimales como "2h 30min" o "45 min" — usado en Cotizar y Enviar solicitud.
+function formatoHoras(h) {
+  if (h == null) return null;
+  if (h < 1) return Math.ceil(h * 60) + " min";
+  const horas = Math.floor(h);
+  const min = Math.round((h - horas) * 60);
+  return horas + "h" + (min > 0 ? " " + min + "min" : "");
+}
+
+function seleccionarEscalon(escalones, qty) {
+  const q = Math.max(0, parseFloat(qty) || 0);
+  const activos = (escalones || []).filter(e => e.precio !== "" && e.precio != null);
+  if (!activos.length) return null;
+  const ordenados = [...activos].sort((a, b) => (parseFloat(a.tiraje_min) || 0) - (parseFloat(b.tiraje_min) || 0));
+  let match = ordenados.find(e => {
+    const min = parseFloat(e.tiraje_min) || 0;
+    const max = e.tiraje_max === "" || e.tiraje_max == null ? Infinity : parseFloat(e.tiraje_max);
+    return q >= min && q <= max;
+  });
+  if (!match) match = q < (parseFloat(ordenados[0].tiraje_min) || 0) ? ordenados[0] : ordenados[ordenados.length - 1];
+  return match;
+}
+
+// La cantidad de referencia para elegir escalón, según la unidad del servicio.
+function qtyRefParaEscalon(unidad_precio, qty) {
+  if (unidad_precio === "por_millar") return qty / 1000;
+  if (unidad_precio === "fijo") return 0;
+  return qty; // por_pieza, unidad, por_kg
+}
+
+// Costo real para una cantidad dada, según la unidad del servicio.
+// Devuelve null si no se puede calcular automáticamente (por_kg necesita el peso real).
+function costoServicioPorCantidad(unidad_precio, precio, qty) {
+  const p = parseFloat(precio) || 0;
+  const q = Math.max(0, parseFloat(qty) || 0);
+  if (unidad_precio === "por_millar") return (q / 1000) * p;
+  if (unidad_precio === "por_pieza" || unidad_precio === "unidad") return q * p;
+  if (unidad_precio === "fijo") return p;
+  return null;
+}
+
+// Compara dos listas de escalones ignorando el campo `id` (que solo existe en los ya guardados).
+function escalonesIguales(a, b) {
+  const norm = arr => (arr || [])
+    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}`)
+    .sort();
+  const na = norm(a), nb = norm(b);
+  return na.length === nb.length && na.every((v, i) => v === nb[i]);
+}
+
+// Quita acentos y pasa a minúsculas, para que buscar "cuche" encuentre "Couché".
+function normalizarTexto(s) {
+  return (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// ── Cronograma general: lista de trabajos activos, guardada en localStorage ──
+// (igual que el resto del historial de este Cotizador, vive en este navegador).
+const CRONOGRAMA_KEY = "mrblue_cronograma_trabajos";
+function loadCronogramaTrabajos() {
+  try { return JSON.parse(localStorage.getItem(CRONOGRAMA_KEY) || "[]"); } catch { return []; }
+}
+function saveCronogramaTrabajos(lista) {
+  localStorage.setItem(CRONOGRAMA_KEY, JSON.stringify(lista));
+}
+// Agrega o actualiza (por id) un trabajo en el cronograma general.
+function upsertCronogramaTrabajo(trabajo) {
+  const lista = loadCronogramaTrabajos();
+  const idx = lista.findIndex(t => t.id === trabajo.id);
+  if (idx >= 0) lista[idx] = trabajo; else lista.push(trabajo);
+  saveCronogramaTrabajos(lista);
+  return lista;
+}
+
 function fmtP(n) {
   if (!n && n !== 0) return "—";
   return Number(n).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -295,7 +374,7 @@ function fmtP(n) {
 // El catálogo de servicios/procesos se lee de Supabase (servicios_catalogo),
 // así que agregar o quitar servicios ahí se refleja aquí sin tocar código.
 function FichaPrecios({ prov, onSave }) {
-  // precios: { [servicio_id]: { precio_millar, rango_min, rango_max, notas, historial: [{precio, fecha, qty}] } }
+  // precios: { [servicio_id]: { escalones: [{id, tiraje_min, tiraje_max, precio, notas}], historial: [...] } }
   const [catalogo, setCatalogo] = useState([]);
   const [loadingCat, setLoadingCat] = useState(true);
   const [precios, setPrecios] = useState({});
@@ -311,7 +390,11 @@ function FichaPrecios({ prov, onSave }) {
       setCatalogo(cat);
       const base = {};
       cat.forEach(s => {
-        base[s.id] = prov.precios?.[s.id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
+        const existentes = prov.precios?.[s.id]?.escalones || [];
+        base[s.id] = {
+          escalones: existentes.length ? existentes.map(e => ({ ...e })) : [nuevoEscalon()],
+          historial: prov.precios?.[s.id]?.historial || [],
+        };
       });
       setPrecios(base);
       const categorias = [...new Set(cat.map(s => s.categoria))];
@@ -322,8 +405,15 @@ function FichaPrecios({ prov, onSave }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prov.id]);
 
-  const update = (id, field, val) =>
-    setPrecios(prev => ({ ...prev, [id]: { ...prev[id], [field]: val } }));
+  const updateEscalon = (sid, idx, field, val) =>
+    setPrecios(prev => ({
+      ...prev,
+      [sid]: { ...prev[sid], escalones: prev[sid].escalones.map((e, i) => i === idx ? { ...e, [field]: val } : e) },
+    }));
+  const addEscalon = (sid) =>
+    setPrecios(prev => ({ ...prev, [sid]: { ...prev[sid], escalones: [...prev[sid].escalones, nuevoEscalon()] } }));
+  const removeEscalon = (sid, idx) =>
+    setPrecios(prev => ({ ...prev, [sid]: { ...prev[sid], escalones: prev[sid].escalones.filter((_, i) => i !== idx) } }));
 
   const guardar = () => {
     onSave({ ...prov, precios });
@@ -331,7 +421,7 @@ function FichaPrecios({ prov, onSave }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
-  // ── Importar CSV: llena los precios de golpe, comparando por nombre con el catálogo.
+  // ── Importar CSV: llena el primer escalón de cada servicio (sin tiraje), comparando por nombre.
   // Formato esperado: nombre,precio (una fila por servicio). No se guarda hasta darle "Guardar precios".
   const [importInfo, setImportInfo] = useState(null); // { matched, total }
   const onImportCsv = (e) => {
@@ -347,7 +437,9 @@ function FichaPrecios({ prov, onSave }) {
           const s = catalogo.find(c => c.nombre.trim().toLowerCase() === nombre.trim().toLowerCase());
           if (!s) return;
           matched++;
-          next[s.id] = { ...(next[s.id] || { rango_min: "", rango_max: "", notas: "", historial: [] }), precio_millar: precio };
+          const actuales = next[s.id]?.escalones || [nuevoEscalon()];
+          const primero = { ...actuales[0], precio };
+          next[s.id] = { escalones: [primero, ...actuales.slice(1)], historial: next[s.id]?.historial || [] };
         });
         return next;
       });
@@ -360,7 +452,7 @@ function FichaPrecios({ prov, onSave }) {
 
   const categorias = [...new Set(catalogo.map(s => s.categoria))];
   const categoriasConPrecio = categorias.filter(cat =>
-    catalogo.some(s => s.categoria === cat && parseFloat(precios[s.id]?.precio_millar) > 0)
+    catalogo.some(s => s.categoria === cat && (precios[s.id]?.escalones || []).some(e => parseFloat(e.precio) > 0))
   );
   const categoriasVisibles = soloConPrecio ? categoriasConPrecio : categorias;
 
@@ -395,6 +487,8 @@ function FichaPrecios({ prov, onSave }) {
     );
   }
 
+  const unidadLabel = { por_millar: "$ / millar", por_pieza: "$ / pieza", unidad: "$ / unidad", por_kg: "$ / kg", fijo: "$ (costo único)" };
+
   return (
     <div style={{ marginTop: 14 }}>
       {/* Importar CSV con nombre,precio — llena los campos de abajo sin guardar todavía */}
@@ -427,70 +521,75 @@ function FichaPrecios({ prov, onSave }) {
         Mostrar solo lo que este proveedor ya maneja (tiene precio cargado)
       </label>
 
-      {/* Encabezado columnas */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 80px", gap: "0 8px",
-        padding: "0 4px 6px", fontSize: 10, fontWeight: 700, color: C.muted,
-        textTransform: "uppercase", letterSpacing: "0.06em" }}>
-        <div>Servicio</div>
-        <div style={{ textAlign: "right" }}>$ Precio</div>
-        <div style={{ textAlign: "right" }}>Tiraje mín</div>
-        <div style={{ textAlign: "right" }}>Tiraje máx</div>
-      </div>
+      {categoriaAbierta === "impresion" && (
+        <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 12px", fontSize: 11.5, color: C.text, marginBottom: 12 }}>
+          💡 Captura el precio <b>por color</b> (ej. GP Impresores: $600/millar por color), no el total. El sistema multiplica automáticamente por el número de colores según el nombre del servicio ("4/0" = 4 colores, "4/4" = 8 colores).
+        </div>
+      )}
 
       {catalogo
         .filter(s => s.categoria === categoriaAbierta)
-        .filter(s => !soloConPrecio || parseFloat(precios[s.id]?.precio_millar) > 0)
+        .filter(s => !soloConPrecio || (precios[s.id]?.escalones || []).some(e => parseFloat(e.precio) > 0))
         .map(s => {
-        const d = precios[s.id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
-        const hist = d.historial || [];
-        const ultimo = hist.length > 0 ? hist[hist.length - 1] : null;
-        const variacion = hist.length > 1
-          ? ((parseFloat(hist[hist.length-1].precio) - parseFloat(hist[hist.length-2].precio)) / parseFloat(hist[hist.length-2].precio) * 100)
-          : null;
+        const d = precios[s.id] || { escalones: [nuevoEscalon()], historial: [] };
+        const esFijo = s.unidad_precio === "fijo";
 
         return (
-          <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 6, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 80px 80px", gap: "0 8px", padding: "10px 12px", alignItems: "center" }}>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{s.nombre}</div>
-                {s.unidad_precio && <div style={{ fontSize: 10, color: C.muted }}>por {s.unidad_precio}</div>}
-                {ultimo && (
-                  <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>
-                    Último: ${fmtP(ultimo.precio)}
-                    {variacion !== null && (
-                      <span style={{ marginLeft: 6, color: variacion > 0 ? C.red : C.green, fontWeight: 700 }}>
-                        {variacion > 0 ? "▲" : "▼"}{Math.abs(variacion).toFixed(1)}%
-                      </span>
-                    )}
-                    {" · "}{new Date(ultimo.fecha).toLocaleDateString("es-MX")}
-                  </div>
-                )}
+          <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+            <div style={{ padding: "9px 12px 4px", fontWeight: 700, fontSize: 13, color: C.text }}>
+              {s.nombre}
+              {esFijo && <span style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginLeft: 6 }}>(costo único por proyecto)</span>}
+            </div>
+
+            {!esFijo && (
+              <div style={{ display: "grid", gridTemplateColumns: "80px 80px 1fr 70px 32px", gap: "0 8px",
+                padding: "0 12px 4px", fontSize: 10, fontWeight: 700, color: C.muted,
+                textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <div>Desde</div><div>Hasta</div><div>{unidadLabel[s.unidad_precio] || "$"}</div><div>Horas</div><div />
               </div>
-              <div>
+            )}
+
+            {d.escalones.map((e, idx) => (
+              <div key={idx} style={{ display: "grid",
+                gridTemplateColumns: esFijo ? "1fr 70px 32px" : "80px 80px 1fr 70px 32px",
+                gap: 8, padding: "4px 12px", alignItems: "center" }}>
+                {!esFijo && <>
+                  <input value={e.tiraje_min} onChange={ev => updateEscalon(s.id, idx, "tiraje_min", ev.target.value)}
+                    type="number" placeholder="1" title="Cantidad mínima"
+                    style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                  <input value={e.tiraje_max} onChange={ev => updateEscalon(s.id, idx, "tiraje_max", ev.target.value)}
+                    type="number" placeholder="en adelante" title="Cantidad máxima (vacío = en adelante)"
+                    style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                </>}
                 <div style={{ position: "relative" }}>
                   <span style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
-                  <input value={d.precio_millar} onChange={e => update(s.id, "precio_millar", e.target.value)}
+                  <input value={e.precio} onChange={ev => updateEscalon(s.id, idx, "precio", ev.target.value)}
                     type="number" step="0.01" placeholder="0.00"
                     style={{ ...inputStyle, paddingLeft: 18, fontSize: 12, textAlign: "right", padding: "6px 8px 6px 18px" }} />
                 </div>
+                <input value={e.tiempo_horas} onChange={ev => updateEscalon(s.id, idx, "tiempo_horas", ev.target.value)}
+                  type="number" step="0.5" placeholder="—" title="Tiempo estimado (horas) para este escalón"
+                  style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                <button onClick={() => removeEscalon(s.id, idx)} title="Quitar escalón"
+                  style={{ border: `1px solid ${C.red}`, color: C.red, background: "none", borderRadius: 7, cursor: "pointer", height: 28 }}>×</button>
               </div>
-              <input value={d.rango_min} onChange={e => update(s.id, "rango_min", e.target.value)}
-                type="number" placeholder="1,000" title="Tiraje mínimo"
-                style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
-              <input value={d.rango_max} onChange={e => update(s.id, "rango_max", e.target.value)}
-                type="number" placeholder="50,000" title="Tiraje máximo"
-                style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
-            </div>
-            {/* Notas */}
-            <div style={{ padding: "0 12px 8px" }}>
-              <input value={d.notas} onChange={e => update(s.id, "notas", e.target.value)}
+            ))}
+
+            <div style={{ padding: "4px 12px 8px" }}>
+              {!esFijo && (
+                <button onClick={() => addEscalon(s.id)} style={{ ...btn(C.card, true), color: C.navy, border: `1.5px dashed ${C.border}`, fontSize: 11, padding: "5px 10px" }}>
+                  + Agregar escalón
+                </button>
+              )}
+              <input value={d.escalones[0]?.notas || ""} onChange={ev => updateEscalon(s.id, 0, "notas", ev.target.value)}
                 placeholder="Notas (incluye setup, planchas, condiciones especiales…)"
-                style={{ ...inputStyle, fontSize: 11, padding: "4px 8px", color: C.muted }} />
+                style={{ ...inputStyle, fontSize: 11, padding: "4px 8px", color: C.muted, marginTop: 6 }} />
             </div>
+
             {/* Historial mini */}
-            {hist.length > 0 && (
+            {(d.historial || []).length > 0 && (
               <div style={{ padding: "0 12px 8px", display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {hist.slice(-4).map((h, i) => (
+                {d.historial.slice(-4).map((h, i) => (
                   <span key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "2px 8px", fontSize: 10, color: C.muted }}>
                     ${fmtP(h.precio)} · {new Date(h.fecha).toLocaleDateString("es-MX")}
                     {h.qty ? ` · ${parseInt(h.qty).toLocaleString("es-MX")} pzas` : ""}
@@ -502,7 +601,7 @@ function FichaPrecios({ prov, onSave }) {
         );
       })}
 
-      {catalogo.filter(s => s.categoria === categoriaAbierta).filter(s => !soloConPrecio || parseFloat(precios[s.id]?.precio_millar) > 0).length === 0 && (
+      {catalogo.filter(s => s.categoria === categoriaAbierta).filter(s => !soloConPrecio || (precios[s.id]?.escalones || []).some(e => parseFloat(e.precio) > 0)).length === 0 && (
         <div style={{ color: C.muted, fontSize: 12, padding: "10px 4px" }}>
           {soloConPrecio ? "Ningún servicio de esta categoría tiene precio cargado todavía." : "Sin servicios en esta categoría."}
         </div>
@@ -517,21 +616,21 @@ function FichaPrecios({ prov, onSave }) {
 
 // ── Capa de datos: Proveedores, Máquinas y Tarifas (Supabase) ────────────────
 // Reconstruye la misma forma que usaba proveedores_db en window.storage:
-//   [{ id, nombre, maquinas:[...], precios:{ [servicio_id]: {precio_millar, rango_min, rango_max, notas, historial:[]} } }]
+//   [{ id, nombre, maquinas:[...], precios:{ [servicio_id]: { escalones:[{tiraje_min,tiraje_max,precio,notas}], historial:[] } } }]
 // para no tener que tocar los componentes que ya consumen ese shape.
 // precios ahora se indexa por el id real del servicio en servicios_catalogo,
 // así que no depende de una lista fija de "claves" escrita en el código.
 
 async function loadProveedoresDB() {
   const { data: provs, error: e1 } = await supabase
-    .from("proveedores").select("id, nombre, tipo").order("nombre");
+    .from("proveedores").select("id, nombre, tipo, calificacion").order("nombre");
   if (e1) { console.error(e1); return []; }
 
   const { data: maqs } = await supabase.from("maquinas").select("*");
   const { data: tarifas } = await supabase
     .from("tarifas")
-    .select("proveedor_id, servicio_id, precio, notas_precio, tiraje_min, tiraje_max, qty_referencia, created_at")
-    .order("created_at", { ascending: true });
+    .select("id, proveedor_id, servicio_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at")
+    .order("tiraje_min", { ascending: true, nullsFirst: true });
 
   return (provs || []).map(p => {
     const maquinas = (maqs || [])
@@ -541,22 +640,29 @@ async function loadProveedoresDB() {
         minW: m.min_w ?? "", minH: m.min_h ?? "",
         maxW: m.max_w ?? "", maxH: m.max_h ?? "",
         colores: m.colores || [], tiraje_minimo: m.tiraje_minimo ?? "", notas: m.notas || "",
+        pliegoEstandarW: m.pliego_estandar_w ?? "", pliegoEstandarH: m.pliego_estandar_h ?? "",
+        velocidadHora: m.velocidad_hora ?? "",
       }));
 
+    // precios[servicio_id] = { escalones: [{id, tiraje_min, tiraje_max, precio, notas}], historial: [todas las filas, incl. inactivas] }
     const precios = {};
-    (tarifas || []).filter(t => t.proveedor_id === p.id).forEach(t => {
-      if (!t.servicio_id) return;
-      const proceso = precios[t.servicio_id] || { precio_millar: "", rango_min: "", rango_max: "", notas: "", historial: [] };
-      proceso.historial.push({ precio: t.precio, fecha: t.created_at, qty: t.qty_referencia });
-      // Como viene ordenado asc por fecha, el último que se escribe queda como el vigente
-      proceso.precio_millar = t.precio;
-      proceso.rango_min = t.tiraje_min ?? "";
-      proceso.rango_max = t.tiraje_max ?? "";
-      proceso.notas = t.notas_precio || "";
-      precios[t.servicio_id] = proceso;
+    (tarifas || []).filter(t => t.proveedor_id === p.id && t.servicio_id).forEach(t => {
+      const sid = t.servicio_id;
+      if (!precios[sid]) precios[sid] = { escalones: [], historial: [] };
+      precios[sid].historial.push({
+        id: t.id, precio: t.precio, fecha: t.created_at, qty: t.qty_referencia,
+        tiraje_min: t.tiraje_min, tiraje_max: t.tiraje_max, activo: t.activo,
+      });
+      // activo === null cubre filas de antes de la migración (se tratan como vigentes)
+      if (t.activo !== false) {
+        precios[sid].escalones.push({
+          id: t.id, tiraje_min: t.tiraje_min ?? "", tiraje_max: t.tiraje_max ?? "",
+          precio: t.precio, tiempo_horas: t.tiempo_horas ?? "", notas: t.notas_precio || "",
+        });
+      }
     });
 
-    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", maquinas, precios };
+    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, maquinas, precios };
   });
 }
 
@@ -576,6 +682,33 @@ async function updateProveedorTipoDB(id, tipo) {
   if (error) console.error(error);
 }
 
+async function updateProveedorCalificacionDB(id, calificacion) {
+  const { error } = await supabase.from("proveedores").update({ calificacion }).eq("id", id);
+  if (error) console.error(error);
+}
+
+async function loadEntregasProveedor(proveedorId) {
+  const { data, error } = await supabase.from("entregas").select("*")
+    .eq("proveedor_id", proveedorId).order("fecha_real", { ascending: false });
+  if (error) { console.error(error); return []; }
+  return data || [];
+}
+
+// Registra una entrega y recalcula la calificación del proveedor (promedio de todas sus entregas).
+async function registrarEntregaDB({ proveedorId, trabajoNombre, fechaPrometida, fechaReal, calificacion, notas }) {
+  const aTiempo = fechaPrometida ? new Date(fechaReal) <= new Date(fechaPrometida) : null;
+  const { error: eIns } = await supabase.from("entregas").insert({
+    proveedor_id: proveedorId, trabajo_nombre: trabajoNombre,
+    fecha_prometida: fechaPrometida || null, fecha_real: fechaReal,
+    calificacion, a_tiempo: aTiempo, notas: notas || null,
+  });
+  if (eIns) { console.error(eIns); return; }
+
+  const entregas = await loadEntregasProveedor(proveedorId);
+  const promedio = entregas.length ? entregas.reduce((s, e) => s + Number(e.calificacion), 0) / entregas.length : calificacion;
+  await updateProveedorCalificacionDB(proveedorId, Math.round(promedio * 10) / 10);
+}
+
 async function deleteProveedorDB(id) {
   const { error } = await supabase.from("proveedores").delete().eq("id", id);
   if (error) console.error(error);
@@ -587,6 +720,8 @@ async function saveMachineDB(provId, machine) {
     min_w: machine.minW || null, min_h: machine.minH || null,
     max_w: machine.maxW || null, max_h: machine.maxH || null,
     colores: machine.colores, tiraje_minimo: machine.tiraje_minimo || null, notas: machine.notas,
+    pliego_estandar_w: machine.pliegoEstandarW || null, pliego_estandar_h: machine.pliegoEstandarH || null,
+    velocidad_hora: machine.velocidadHora || null,
   };
   const { error } = await supabase.from("maquinas").upsert(row);
   if (error) console.error(error);
@@ -655,29 +790,37 @@ function parseCsvPrecios(text) {
 // Guarda solo los precios que realmente cambiaron respecto a `previos`, insertando
 // una fila nueva en `tarifas` por cada uno (así se conserva el historial completo).
 // `precios` viene indexado por servicio_id real, así que se inserta directo.
+// Guarda los escalones de precio por servicio. Para cada servicio cuyo set de
+// escalones cambió respecto a `previos`: desactiva (activo=false) los escalones
+// vigentes anteriores —sin borrarlos, para conservar el historial— e inserta el
+// set nuevo completo con activo=true. Si un servicio se quitó por completo de la
+// ficha, sus escalones anteriores también se desactivan.
 async function savePreciosDB(provId, precios, previos) {
-  const rows = [];
-  for (const servicio_id of Object.keys(precios)) {
-    const d = precios[servicio_id];
-    const prev = previos?.[servicio_id];
-    const sinValor = d.precio_millar === "" || d.precio_millar == null;
-    if (sinValor) continue;
-    const cambio = !prev || String(prev.precio_millar) !== String(d.precio_millar)
-      || String(prev.rango_min) !== String(d.rango_min)
-      || String(prev.rango_max) !== String(d.rango_max)
-      || String(prev.notas) !== String(d.notas);
-    if (!cambio) continue;
+  const todasLasLlaves = new Set([...Object.keys(precios || {}), ...Object.keys(previos || {})]);
+  for (const servicio_id of todasLasLlaves) {
+    const nuevos = (precios?.[servicio_id]?.escalones || []).filter(e => e.precio !== "" && e.precio != null);
+    const anteriores = previos?.[servicio_id]?.escalones || [];
+    if (escalonesIguales(nuevos, anteriores)) continue;
 
-    rows.push({
-      proveedor_id: provId, servicio_id,
-      precio: parseFloat(d.precio_millar),
-      tiraje_min: d.rango_min || null, tiraje_max: d.rango_max || null,
-      notas_precio: d.notas || null,
-    });
-  }
-  if (rows.length) {
-    const { error } = await supabase.from("tarifas").insert(rows);
-    if (error) console.error(error);
+    const idsAnteriores = anteriores.map(e => e.id).filter(Boolean);
+    if (idsAnteriores.length) {
+      const { error: eOff } = await supabase.from("tarifas").update({ activo: false }).in("id", idsAnteriores);
+      if (eOff) console.error(eOff);
+    }
+
+    if (nuevos.length) {
+      const rows = nuevos.map(e => ({
+        proveedor_id: provId, servicio_id,
+        precio: parseFloat(e.precio),
+        tiraje_min: e.tiraje_min === "" ? null : parseFloat(e.tiraje_min),
+        tiraje_max: e.tiraje_max === "" ? null : parseFloat(e.tiraje_max),
+        tiempo_horas: e.tiempo_horas === "" || e.tiempo_horas == null ? null : parseFloat(e.tiempo_horas),
+        notas_precio: e.notas || null,
+        activo: true,
+      }));
+      const { error: eIns } = await supabase.from("tarifas").insert(rows);
+      if (eIns) console.error(eIns);
+    }
   }
 }
 
@@ -686,6 +829,7 @@ async function registrarPrecioEnFicha(proveedorId, servicioId, precio, qty, fech
     proveedor_id: proveedorId, servicio_id: servicioId,
     precio: parseFloat(precio),
     qty_referencia: qty ? parseInt(qty) : null,
+    activo: true,
   });
   if (error) console.error(error);
 }
@@ -694,6 +838,7 @@ const emptyMachine = () => ({
   id: crypto.randomUUID(), nombre: "", tipo: "Offset",
   minW: "", minH: "", maxW: "", maxH: "",
   colores: [], tiraje_minimo: "", notas: "",
+  pliegoEstandarW: "", pliegoEstandarH: "", velocidadHora: "",
 });
 
 function MachineForm({ machine, onChange, onSave, onCancel }) {
@@ -751,6 +896,25 @@ function MachineForm({ machine, onChange, onSave, onCancel }) {
             onChange={e => onChange({ ...machine, maxH: e.target.value })}
             placeholder="Ej: 102" style={inputStyle} />
         </div>
+        <div>
+          <label style={labelStyle}>Pliego estándar preferido — Ancho (cm)</label>
+          <input value={machine.pliegoEstandarW} type="number" step="0.1"
+            onChange={e => onChange({ ...machine, pliegoEstandarW: e.target.value })}
+            placeholder="Ej: 56" style={inputStyle} />
+        </div>
+        <div>
+          <label style={labelStyle}>Pliego estándar preferido — Alto (cm)</label>
+          <input value={machine.pliegoEstandarH} type="number" step="0.1"
+            onChange={e => onChange({ ...machine, pliegoEstandarH: e.target.value })}
+            placeholder="Ej: 87" style={inputStyle} />
+        </div>
+        <div style={{ gridColumn: "1 / -1" }}>
+          <label style={labelStyle}>Velocidad (pliegos por hora)</label>
+          <input value={machine.velocidadHora} type="number" step="1"
+            onChange={e => onChange({ ...machine, velocidadHora: e.target.value })}
+            placeholder="Ej: 5000" style={inputStyle} />
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>Se usa para estimar el tiempo de producción en las cotizaciones.</div>
+        </div>
         <div style={{ gridColumn: "1 / -1" }}>
           <label style={labelStyle}>Colores que imprime</label>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -779,6 +943,69 @@ function MachineForm({ machine, onChange, onSave, onCancel }) {
 }
 
 // ── Archivos de un proveedor: subir PDF/Excel de su lista de precios y verla después ──
+function HistorialEntregas({ proveedorId }) {
+  const [entregas, setEntregas] = useState(null); // null = cargando
+
+  useEffect(() => { loadEntregasProveedor(proveedorId).then(setEntregas); }, [proveedorId]);
+
+  if (entregas === null) return <div style={{ color: C.muted, fontSize: 12, padding: "10px 0" }}>Cargando…</div>;
+
+  if (entregas.length === 0) {
+    return (
+      <div style={{ marginTop: 14, color: C.muted, fontSize: 12.5 }}>
+        Todavía no hay entregas registradas para este proveedor. Se registran desde 📅 Cronograma cuando marcas un trabajo como entregado.
+      </div>
+    );
+  }
+
+  const promedio = entregas.reduce((s, e) => s + Number(e.calificacion), 0) / entregas.length;
+  const aTiempoCount = entregas.filter(e => e.a_tiempo === true).length;
+  const conDatoPuntualidad = entregas.filter(e => e.a_tiempo != null).length;
+  const pctATiempo = conDatoPuntualidad ? Math.round((aTiempoCount / conDatoPuntualidad) * 100) : null;
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ display: "flex", gap: 16, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 14px" }}>
+          <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", fontWeight: 700 }}>Calificación promedio</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#F5A623" }}>{"★".repeat(Math.round(promedio))}{"☆".repeat(5 - Math.round(promedio))} <span style={{ fontSize: 12, color: C.text }}>({promedio.toFixed(1)})</span></div>
+        </div>
+        {pctATiempo != null && (
+          <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 14px" }}>
+            <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", fontWeight: 700 }}>Entregas a tiempo</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: pctATiempo >= 80 ? C.green : pctATiempo >= 50 ? C.amber : C.coral }}>{pctATiempo}%</div>
+          </div>
+        )}
+        <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 14px" }}>
+          <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", fontWeight: 700 }}>Total de entregas</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>{entregas.length}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {entregas.map(e => (
+          <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+            background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px" }}>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>{e.trabajo_nombre || "Sin nombre"}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+                {new Date(e.fecha_real).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric" })}
+                {e.notas ? " · " + e.notas : ""}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ color: "#F5A623", fontSize: 13 }}>{"★".repeat(e.calificacion)}{"☆".repeat(5 - e.calificacion)}</div>
+              {e.a_tiempo != null && (
+                <div style={{ fontSize: 10, fontWeight: 700, color: e.a_tiempo ? C.green : C.coral }}>{e.a_tiempo ? "A tiempo" : "Tarde"}</div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ArchivosProveedor({ provId }) {
   const [archivos, setArchivos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -937,7 +1164,7 @@ function AdminProveedores() {
       )}
 
       {proveedores.filter(p => filtroTipo === "Todos" || p.tipo === filtroTipo).map(prov => {
-        const preciosConDatos = Object.values(prov.precios || {}).filter(d => parseFloat(d?.precio_millar) > 0).length;
+        const preciosConDatos = Object.values(prov.precios || {}).filter(d => (d?.escalones || []).some(e => parseFloat(e.precio) > 0)).length;
         const maqCount = prov.maquinas?.length ?? 0;
 
         return (
@@ -954,6 +1181,12 @@ function AdminProveedores() {
                     }}>
                     {TIPOS_PROVEEDOR.map(t => <option key={t} value={t} style={{ color: C.text, background: C.card }}>{t}</option>)}
                   </select>
+                  <span title={prov.calificacion > 0 ? "Calificación calculada de sus entregas registradas" : "Sin entregas registradas todavía"}>
+                    {[1, 2, 3, 4, 5].map(n => (
+                      <span key={n} style={{ color: n <= Math.round(prov.calificacion || 0) ? "#F5A623" : C.border, fontSize: 15 }}>★</span>
+                    ))}
+                    {prov.calificacion > 0 && <span style={{ fontSize: 10.5, color: C.muted, marginLeft: 3 }}>({prov.calificacion})</span>}
+                  </span>
                 </div>
                 <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
                   {maqCount === 0 ? "Sin máquinas" : `${maqCount} máquina${maqCount > 1 ? "s" : ""}`}
@@ -978,6 +1211,12 @@ function AdminProveedores() {
                     color: expanded[prov.id] === "archivos" ? "#fff" : C.muted,
                     border: `1.5px solid ${expanded[prov.id] === "archivos" ? C.amber : C.border}` }}>
                   📎 Archivos
+                </button>
+                <button onClick={() => toggleSection(prov.id, "entregas")}
+                  style={{ ...btn(expanded[prov.id] === "entregas" ? "#F5A623" : C.bg),
+                    color: expanded[prov.id] === "entregas" ? "#fff" : C.muted,
+                    border: `1.5px solid ${expanded[prov.id] === "entregas" ? "#F5A623" : C.border}` }}>
+                  📊 Entregas
                 </button>
                 <button onClick={() => deleteProveedor(prov.id)}
                   style={{ ...btn(C.red), background: "none", color: C.red, border: `1.5px solid ${C.red}` }}>
@@ -1043,6 +1282,11 @@ function AdminProveedores() {
             {/* Sección: Archivos (listas de precios en PDF/Excel/CSV) */}
             {expanded[prov.id] === "archivos" && (
               <ArchivosProveedor provId={prov.id} />
+            )}
+
+            {/* Sección: Historial de entregas y calificaciones */}
+            {expanded[prov.id] === "entregas" && (
+              <HistorialEntregas proveedorId={prov.id} />
             )}
           </div>
         );
@@ -1228,10 +1472,12 @@ function Calculadora({ onCalcDone, cotizacion }) {
 // proveedor (Supabase) para armar el costo y el precio de venta. El margen se
 // aplica sobre venta (precio = costo / (1 - margen)), igual que la base de Excel.
 
-function Cotizador({ cotizacion, calcData }) {
+function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   const [proveedores, setProveedores] = useState([]);
   const [catalogo, setCatalogo] = useState([]);
   const [loading, setLoading] = useState(true);
+  const trabajoIdRef = useRef(crypto.randomUUID()); // id estable si la cotización no tiene cot_id todavía
+  const [guardadoCronograma, setGuardadoCronograma] = useState(false);
 
   // Cantidad de piezas y pliegos necesarios (editable por si no vienen de Pliegos)
   const qtyDefault = parseInt(calcData?.qty) || parseInt(cotizacion?.cantidad) || 0;
@@ -1251,6 +1497,12 @@ function Cotizador({ cotizacion, calcData }) {
   const [papelProvId, setPapelProvId] = useState("");
   const [impServicioId, setImpServicioId] = useState("");
   const [impProvId, setImpProvId] = useState("");
+  const [tintasFrente, setTintasFrente] = useState(() => cotizacion?.tintas_frente || "");
+  const [tintasVuelta, setTintasVuelta] = useState(() => cotizacion?.tintas_vuelta || "");
+  const [colorExtraServicioId, setColorExtraServicioId] = useState("");
+  const [colorExtraProvId, setColorExtraProvId] = useState("");
+  const [barnizServicioId, setBarnizServicioId] = useState("");
+  const [barnizProvId, setBarnizProvId] = useState("");
   const [acabados, setAcabados] = useState([]); // [{key, servicioId, provId, base}]
   const [flete, setFlete] = useState("");
   const [extras, setExtras] = useState("");
@@ -1262,32 +1514,78 @@ function Cotizador({ cotizacion, calcData }) {
     });
   }, []);
 
-  // ── Helpers ──
-  const provsConPrecio = (servicioId) =>
+  const servicioPorId = (id) => catalogo.find(s => s.id === id);
+
+  // Costo total que cobraría un proveedor por un servicio, para una cantidad real dada
+  // (ya elige el escalón correcto y aplica la unidad del servicio — millar, pieza, kg, fijo).
+  // Para impresión, el escalón guarda el precio POR COLOR (ej. GP: $600/millar por color);
+  // el costo real se multiplica por el número de colores del servicio (4/0 = 4, 4/4 = 8, etc.).
+  const costoDe = (provId, servicioId, cantidadReal, coloresOverride) => {
+    const p = proveedores.find(x => x.id === provId);
+    const s = servicioPorId(servicioId);
+    const escalones = p?.precios?.[servicioId]?.escalones || [];
+    if (!escalones.length) return null;
+    const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(s?.unidad_precio, cantidadReal));
+    if (!escalon) return null;
+    const colores = coloresOverride != null ? coloresOverride : 1;
+    const precioEfectivo = (parseFloat(escalon.precio) || 0) * colores;
+    return costoServicioPorCantidad(s?.unidad_precio, precioEfectivo, cantidadReal);
+  };
+
+  // Tiempo (horas) capturado para el escalón que aplica, si el proveedor lo cargó.
+  // Devuelve null si no hay dato — así el cronograma sabe cuándo usar un valor por defecto.
+  const tiempoDe = (provId, servicioId, cantidadReal) => {
+    const p = proveedores.find(x => x.id === provId);
+    const s = servicioPorId(servicioId);
+    const escalones = p?.precios?.[servicioId]?.escalones || [];
+    if (!escalones.length) return null;
+    const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(s?.unidad_precio, cantidadReal));
+    const h = parseFloat(escalon?.tiempo_horas);
+    return h > 0 ? h : null;
+  };
+
+  // Proveedores que ya tienen precio para ese servicio, con el costo ya calculado
+  // para `cantidadReal`, ordenados del más barato al más caro.
+  // ¿Este proveedor ya tiene otro trabajo guardado que se cruza con el rango de fechas dado?
+  // Devuelve el nombre del trabajo en conflicto, o null si está libre.
+  const proveedorOcupadoEn = (provId, rango) => {
+    if (!rango || !rango.inicio || !rango.fin) return null;
+    const miId = cotizacion?.cot_id || trabajoIdRef.current;
+    const otros = loadCronogramaTrabajos().filter(t => t.id !== miId && (t.proveedoresUsados || []).some(pu => pu.id === provId));
+    const conflicto = otros.find(t => {
+      const ti = new Date(t.fechaInicio + "T08:00:00").getTime();
+      const tf = new Date(t.fechaEntregaEstimada).getTime();
+      return ti < rango.fin && tf > rango.inicio; // se traslapan
+    });
+    return conflicto ? conflicto.nombre : null;
+  };
+
+  const provsConPrecio = (servicioId, cantidadReal, rangoFechas) =>
     proveedores
-      .map(p => ({ id: p.id, nombre: p.nombre, tipo: p.tipo, precio: parseFloat(p.precios?.[servicioId]?.precio_millar) }))
-      .filter(p => p.precio > 0)
+      .map(p => ({
+        id: p.id, nombre: p.nombre, tipo: p.tipo, calificacion: p.calificacion || 0,
+        precio: costoDe(p.id, servicioId, cantidadReal),
+        tiempo: tiempoDe(p.id, servicioId, cantidadReal),
+        ocupado: rangoFechas ? proveedorOcupadoEn(p.id, rangoFechas) : null,
+      }))
+      .filter(p => p.precio != null && p.precio > 0)
       .sort((a, b) => a.precio - b.precio);
 
-  const precioDe = (provId, servicioId) => {
-    const p = proveedores.find(x => x.id === provId);
-    const v = parseFloat(p?.precios?.[servicioId]?.precio_millar);
-    return v > 0 ? v : null;
-  };
 
   const nombreServicio = (id) => catalogo.find(s => s.id === id)?.nombre || "—";
   const nombreProv = (id) => proveedores.find(p => p.id === id)?.nombre || "—";
 
-  const serviciosDe = (cats) => catalogo.filter(s => cats.includes(s.categoria));
+  const serviciosDe = (cats, patronNombre) => catalogo.filter(s =>
+    cats.includes(s.categoria) && (!patronNombre || s.nombre.toLowerCase().includes(patronNombre.toLowerCase())));
 
   // Solo servicios que al menos un proveedor realmente vende (tiene precio cargado).
   // Así el cotizador nunca ofrece papeles/procesos sin proveedor detrás.
-  const serviciosDisponibles = (cats) =>
-    serviciosDe(cats).filter(s => provsConPrecio(s.id).length > 0);
+  const serviciosDisponibles = (cats, cantidadReal, patronNombre) =>
+    serviciosDe(cats, patronNombre).filter(s => provsConPrecio(s.id, cantidadReal).length > 0);
 
   // Etiqueta para dropdowns: nombre + proveedor más barato + precio + cuántos más lo venden
-  const etiquetaServicio = (s) => {
-    const provs = provsConPrecio(s.id);
+  const etiquetaServicio = (s, cantidadReal) => {
+    const provs = provsConPrecio(s.id, cantidadReal);
     if (!provs.length) return s.nombre;
     const top = provs[0];
     const extra = provs.length > 1 ? ` (+${provs.length - 1} más)` : "";
@@ -1295,9 +1593,9 @@ function Cotizador({ cotizacion, calcData }) {
   };
 
   // Al elegir servicio, autoselecciona el proveedor más barato
-  const elegirServicio = (servicioId, setServ, setProv) => {
+  const elegirServicio = (servicioId, setServ, setProv, cantidadReal) => {
     setServ(servicioId);
-    const provs = provsConPrecio(servicioId);
+    const provs = provsConPrecio(servicioId, cantidadReal);
     setProv(provs.length ? provs[0].id : "");
   };
 
@@ -1308,37 +1606,114 @@ function Cotizador({ cotizacion, calcData }) {
   const delAcabado = (key) => setAcabados(prev => prev.filter(a => a.key !== key));
 
   // ── Costos ──
+  const tf = parseInt(tintasFrente) || 0;
+  const tv = parseInt(tintasVuelta) || 0;
+  const coloresManual = (tf + tv) > 0 ? (tf + tv) : null; // si ambos están vacíos, usa 1 por defecto
+  const [colorExtraCantidad, setColorExtraCantidad] = useState("1"); // cuántos colores extra sobre el set base
+
   const costoPapel = papelProvId && papelServicioId && pliegos
-    ? (pliegos / 1000) * (precioDe(papelProvId, papelServicioId) || 0) : 0;
+    ? (costoDe(papelProvId, papelServicioId, pliegos) || 0) : 0;
   const costoImp = impProvId && impServicioId && pliegos
-    ? (pliegos / 1000) * (precioDe(impProvId, impServicioId) || 0) : 0;
+    ? (costoDe(impProvId, impServicioId, pliegos, coloresManual != null ? coloresManual : undefined) || 0) : 0;
+  const costoColorExtra = colorExtraProvId && colorExtraServicioId && pliegos
+    ? (costoDe(colorExtraProvId, colorExtraServicioId, pliegos, parseInt(colorExtraCantidad) || 1) || 0) : 0;
+  const costoBarniz = barnizProvId && barnizServicioId && pliegos
+    ? (costoDe(barnizProvId, barnizServicioId, pliegos) || 0) : 0;
   const costoAcabados = acabados.reduce((sum, a) => {
     if (!a.servicioId || !a.provId) return sum;
     const unidades = a.base === "pliegos" ? pliegos : qty;
-    return sum + (unidades / 1000) * (precioDe(a.provId, a.servicioId) || 0);
+    return sum + (costoDe(a.provId, a.servicioId, unidades) || 0);
   }, 0);
   const costoFlete = parseFloat(flete) || 0;
   const costoExtras = parseFloat(extras) || 0;
-  const costoTotal = costoPapel + costoImp + costoAcabados + costoFlete + costoExtras;
+  const costoTotal = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFlete + costoExtras;
 
+  // ── Tiempo estimado de producción ──
+  // Usa la máquina del proveedor de Impresión que tenga velocidad cargada
+  // (si tiene varias, la primera con velocidad_hora capturada).
+  const maquinaDe = (provId) => {
+    const p = proveedores.find(x => x.id === provId);
+    return (p?.maquinas || []).find(m => parseFloat(m.velocidadHora) > 0) || null;
+  };
+  const maquinaImp = impProvId ? maquinaDe(impProvId) : null;
+  const horasEstimadas = maquinaImp && pliegos
+    ? pliegos / parseFloat(maquinaImp.velocidadHora) : null;
   const m = Math.min(Math.max(parseFloat(margen) || 0, 0), 90) / 100;
   const precioVenta = costoTotal > 0 ? costoTotal / (1 - m) : 0;
   const utilidad = precioVenta - costoTotal;
+
   const precioUnitario = qty > 0 ? precioVenta / qty : 0;
   const precioMillar = precioUnitario * 1000;
 
   const money = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // ── Cronograma de producción ──
+  // Un paso por cada proceso seleccionado. Impresión se calcula sola (velocidad de
+  // máquina); los demás son estimaciones editables porque todavía no hay tiempos
+  // capturados por proveedor — captúralos aquí cotización por cotización mientras tanto.
+  const [fechaInicio, setFechaInicio] = useState(() => new Date().toISOString().slice(0, 10));
+  const [duracionesManual, setDuracionesManual] = useState({}); // { [key]: horas }
+
+  const pasosCronograma = [];
+  if (papelServicioId) {
+    const tCap = tiempoDe(papelProvId, papelServicioId, pliegos);
+    pasosCronograma.push({ key: "papel", nombre: "Papel — " + nombreServicio(papelServicioId), horasDefault: tCap ?? 24, editable: tCap == null });
+  }
+  if (impServicioId) pasosCronograma.push({ key: "impresion", nombre: "Impresión — " + nombreServicio(impServicioId), horasDefault: horasEstimadas ?? 4, editable: horasEstimadas == null });
+  if (colorExtraServicioId) {
+    const tCap = tiempoDe(colorExtraProvId, colorExtraServicioId, pliegos);
+    pasosCronograma.push({ key: "pantone", nombre: "Pantone", horasDefault: tCap ?? 2, editable: tCap == null });
+  }
+  if (barnizServicioId) {
+    const tCap = tiempoDe(barnizProvId, barnizServicioId, pliegos);
+    pasosCronograma.push({ key: "barniz", nombre: "Barniz máquina", horasDefault: tCap ?? 3, editable: tCap == null });
+  }
+  acabados.forEach(a => {
+    if (a.servicioId) {
+      const unidadesA = a.base === "pliegos" ? pliegos : qty;
+      const tCap = tiempoDe(a.provId, a.servicioId, unidadesA);
+      pasosCronograma.push({ key: "acabado_" + a.key, nombre: nombreServicio(a.servicioId), horasDefault: tCap ?? 24, editable: tCap == null });
+    }
+  });
+  if (pasosCronograma.length > 0) pasosCronograma.push({ key: "entrega", nombre: "Empaque y entrega", horasDefault: 4, editable: true });
+
+  let cursor = fechaInicio ? new Date(fechaInicio + "T08:00:00") : null;
+  const pasosConFechas = pasosCronograma.map(p => {
+    const horas = duracionesManual[p.key] != null ? duracionesManual[p.key] : p.horasDefault;
+    const inicio = cursor ? new Date(cursor) : null;
+    if (cursor) cursor = new Date(cursor.getTime() + horas * 3600 * 1000);
+    const fin = cursor ? new Date(cursor) : null;
+    return { ...p, horas, inicio, fin };
+  });
+  const horasTotales = pasosConFechas.reduce((s, p) => s + (parseFloat(p.horas) || 0), 0);
+  const fechaEntregaEstimada = pasosConFechas.length ? pasosConFechas[pasosConFechas.length - 1].fin : null;
+  const fmtFecha = (d) => d ? d.toLocaleDateString("es-MX", { weekday: "short", day: "numeric", month: "short" }) + " " + d.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" }) : "—";
+
+  useEffect(() => {
+    if (onTiempoEstimado) {
+      onTiempoEstimado(horasEstimadas != null || fechaEntregaEstimada ? {
+        horas: horasEstimadas, maquinaNombre: maquinaImp?.nombre || "",
+        fechaEntregaEstimada, horasTotales,
+      } : null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [horasEstimadas, maquinaImp?.nombre, fechaEntregaEstimada?.getTime(), horasTotales]);
+
+
 
   const copiarDesglose = () => {
     const lineas = [
       ("COTIZACIÓN " + (cotizacion?.folio || "") + " · " + (cotizacion?.nombre_proyecto || "")).trim(),
       "Cantidad: " + qty.toLocaleString("es-MX") + " pzas · Pliegos (c/merma): " + pliegos.toLocaleString("es-MX"),
       sel ? ("Pliego: " + sel.label + " · " + sel.piecesPerSheet + " pzas/pliego") : null,
+      horasEstimadas != null ? ("Tiempo estimado de impresión: " + formatoHoras(horasEstimadas) + " (" + maquinaImp.nombre + ")") : null,
       "",
       papelServicioId ? ("Papel — " + nombreServicio(papelServicioId) + " (" + nombreProv(papelProvId) + "): " + money(costoPapel)) : null,
       impServicioId ? ("Impresión — " + nombreServicio(impServicioId) + " (" + nombreProv(impProvId) + "): " + money(costoImp)) : null,
+      colorExtraServicioId ? ("Pantone — " + nombreServicio(colorExtraServicioId) + " (" + nombreProv(colorExtraProvId) + "): " + money(costoColorExtra)) : null,
+      barnizServicioId ? ("Barniz máquina — " + nombreServicio(barnizServicioId) + " (" + nombreProv(barnizProvId) + "): " + money(costoBarniz)) : null,
       ...acabados.filter(a => a.servicioId && a.provId).map(a =>
-        "Acabado — " + nombreServicio(a.servicioId) + " (" + nombreProv(a.provId) + "): " + money((a.base === "pliegos" ? pliegos : qty) / 1000 * (precioDe(a.provId, a.servicioId) || 0))),
+        "Acabado — " + nombreServicio(a.servicioId) + " (" + nombreProv(a.provId) + "): " + money(costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty) || 0)),
       costoFlete ? ("Flete: " + money(costoFlete)) : null,
       costoExtras ? ("Extras: " + money(costoExtras)) : null,
       "",
@@ -1351,21 +1726,57 @@ function Cotizador({ cotizacion, calcData }) {
   };
 
   // ── Sub-UI: selector servicio + proveedor con comparación de precios ──
-  const SelectorCosto = ({ titulo, cats, servicioId, provId, setServ, setProv, costo, unidadNota }) => {
-    const provs = servicioId ? provsConPrecio(servicioId) : [];
+  const SelectorCosto = ({ titulo, cats, patronNombre, servicioId, provId, setServ, setProv, costo, unidadNota, cantidadReal }) => {
+    const rango = fechaInicio && fechaEntregaEstimada
+      ? { inicio: new Date(fechaInicio + "T08:00:00").getTime(), fin: fechaEntregaEstimada.getTime() } : null;
+    const provs = servicioId ? provsConPrecio(servicioId, cantidadReal, rango) : [];
+    const masRapido = provs.length ? [...provs].filter(p => p.tiempo != null).sort((a, b) => a.tiempo - b.tiempo)[0]?.id : null;
+    const opciones = serviciosDisponibles(cats, cantidadReal, patronNombre);
+    const [busquedaServ, setBusquedaServ] = useState("");
+    const sugerencias = busquedaServ.length >= 2
+      ? opciones.filter(s => normalizarTexto(s.nombre).includes(normalizarTexto(busquedaServ))).slice(0, 12)
+      : [];
+    const elegirYlimpiar = (sid) => { elegirServicio(sid, setServ, setProv, cantidadReal); setBusquedaServ(""); };
+
     return (
       <div style={{ ...cardStyle, marginBottom: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>{titulo}</div>
           {costo > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costo)}</div>}
         </div>
-        <select value={servicioId} onChange={e => elegirServicio(e.target.value, setServ, setProv)}
+
+        {opciones.length > 6 && (
+          <div style={{ position: "relative", marginBottom: 8 }}>
+            <input value={busquedaServ} onChange={e => setBusquedaServ(e.target.value)}
+              placeholder={`🔍 Buscar ${titulo.toLowerCase()} por nombre (ej. "couché 250")…`}
+              style={{ ...inputStyle, fontSize: 12.5 }} />
+            {sugerencias.length > 0 && (
+              <div style={{ position: "absolute", zIndex: 5, left: 0, right: 0, top: "calc(100% + 2px)",
+                background: C.card, border: `1.5px solid ${C.cyan}`, borderRadius: 8, boxShadow: "0 4px 14px rgba(0,0,0,0.12)",
+                maxHeight: 260, overflowY: "auto" }}>
+                {sugerencias.map(s => (
+                  <div key={s.id} onClick={() => elegirYlimpiar(s.id)}
+                    style={{ padding: "8px 12px", fontSize: 12.5, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}
+                    onMouseEnter={e => e.currentTarget.style.background = C.bg}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    {s.nombre}
+                  </div>
+                ))}
+              </div>
+            )}
+            {busquedaServ.length >= 2 && sugerencias.length === 0 && (
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 4 }}>Sin resultados para "{busquedaServ}".</div>
+            )}
+          </div>
+        )}
+
+        <select value={servicioId} onChange={e => elegirServicio(e.target.value, setServ, setProv, cantidadReal)}
           style={{ ...inputStyle, appearance: "none", marginBottom: 8 }}>
-          <option value="">— Selecciona {titulo.toLowerCase()} ({serviciosDisponibles(cats).length} disponibles) —</option>
-          {serviciosDisponibles(cats).map(s => <option key={s.id} value={s.id}>{etiquetaServicio(s)}</option>)}
+          <option value="">— {opciones.length > 6 ? "O elige de la lista completa" : "Selecciona " + titulo.toLowerCase()} ({opciones.length} disponibles) —</option>
+          {opciones.map(s => <option key={s.id} value={s.id}>{etiquetaServicio(s, cantidadReal)}</option>)}
         </select>
 
-        {serviciosDisponibles(cats).length === 0 && (
+        {opciones.length === 0 && (
           <div style={{ fontSize: 12, color: C.coral }}>
             Ningún proveedor tiene precios de {titulo.toLowerCase()} cargados todavía. Cárgalos en 🏭 Proveedores → Precios.
           </div>
@@ -1379,11 +1790,23 @@ function Cotizador({ cotizacion, calcData }) {
                 borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
                 <input type="radio" checked={provId === p.id} onChange={() => setProv(p.id)}
                   style={{ accentColor: C.cyan }} />
-                <span style={{ flex: 1, fontWeight: 600, color: C.text }}>
-                  {p.nombre}
-                  {i === 0 && <span style={{ marginLeft: 8, background: C.green, color: "#fff", borderRadius: 10, padding: "1px 8px", fontSize: 10, fontWeight: 700 }}>MÁS BARATO</span>}
+                <span style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 600, color: C.text }}>{p.nombre}</span>
+                  {i === 0 && <span style={{ marginLeft: 6, background: C.green, color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 9.5, fontWeight: 700 }}>MÁS BARATO</span>}
+                  {masRapido === p.id && i !== 0 && <span style={{ marginLeft: 6, background: C.navy, color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 9.5, fontWeight: 700 }}>MÁS RÁPIDO</span>}
+                  {p.calificacion > 0 && (
+                    <span style={{ marginLeft: 6, color: "#F5A623", fontSize: 11 }} title={p.calificacion + "/5"}>
+                      {"★".repeat(Math.round(p.calificacion))}{"☆".repeat(5 - Math.round(p.calificacion))}
+                    </span>
+                  )}
+                  {p.ocupado && (
+                    <div style={{ fontSize: 10.5, color: C.coral, marginTop: 2 }}>⚠ Ya tiene "{p.ocupado}" en fechas parecidas</div>
+                  )}
                 </span>
-                <span style={{ fontWeight: 700, color: C.navy }}>{money(p.precio)}<span style={{ fontWeight: 400, color: C.muted, fontSize: 11 }}> {unidadNota}</span></span>
+                <span style={{ textAlign: "right" }}>
+                  <div style={{ fontWeight: 700, color: C.navy }}>{money(p.precio)}<span style={{ fontWeight: 400, color: C.muted, fontSize: 11 }}> {unidadNota}</span></div>
+                  {p.tiempo != null && <div style={{ fontSize: 10.5, color: C.muted }}>⏱ {formatoHoras(p.tiempo)}</div>}
+                </span>
               </label>
             ))}
           </div>
@@ -1419,6 +1842,22 @@ function Cotizador({ cotizacion, calcData }) {
               placeholder="Ej: 1,250" style={inputStyle} />
           </div>
         </div>
+        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
+          <div>
+            <label style={labelStyle}>Tintas frente</label>
+            <input type="number" min="0" value={tintasFrente} onChange={e => setTintasFrente(e.target.value)}
+              placeholder="Ej: 4" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Tintas vuelta</label>
+            <input type="number" min="0" value={tintasVuelta} onChange={e => setTintasVuelta(e.target.value)}
+              placeholder="Ej: 0" style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+          Total: <b>{tf + tv}</b> tintas (define el costo de Impresión, {tf} + {tv})
+          {cotizacion?.num_tintas && ` · Capturado en la solicitud: "${cotizacion.num_tintas}"`}
+        </div>
         {sel && (
           <div style={{ marginTop: 8, fontSize: 12, color: C.muted }}>
             Pliego {sel.label} · {sel.piecesPerSheet} pzas/pliego · merma {mermaPct}%
@@ -1429,12 +1868,45 @@ function Cotizador({ cotizacion, calcData }) {
       <SelectorCosto titulo="Papel" cats={["papel"]}
         servicioId={papelServicioId} provId={papelProvId}
         setServ={setPapelServicioId} setProv={setPapelProvId}
-        costo={costoPapel} unidadNota="/millar pliegos" />
+        costo={costoPapel} unidadNota="(total)" cantidadReal={pliegos} />
 
       <SelectorCosto titulo="Impresión" cats={["impresion"]}
         servicioId={impServicioId} provId={impProvId}
         setServ={setImpServicioId} setProv={setImpProvId}
-        costo={costoImp} unidadNota="/millar pliegos" />
+        costo={costoImp} unidadNota="(total)" cantidadReal={pliegos} />
+      <div style={{ fontSize: 11, color: C.muted, marginTop: -8, marginBottom: 12 }}>
+        Colores usados: <b>{coloresManual != null ? coloresManual : 1}</b>
+        {coloresManual == null && impServicioId ? " (por defecto 1 — captura \"Número de tintas\" arriba si el trabajo lleva más)" : ""}
+        {horasEstimadas != null && (
+          <span> · ⏱ Tiempo estimado de impresión: <b>{formatoHoras(horasEstimadas)}</b> ({maquinaImp.nombre}, {parseFloat(maquinaImp.velocidadHora).toLocaleString("es-MX")} pliegos/hora)</span>
+        )}
+        {impProvId && !maquinaImp && (
+          <span> · Sin velocidad cargada para este proveedor — agrégala en 🏭 Proveedores → Máquinas para ver tiempo estimado.</span>
+        )}
+      </div>
+
+      {cotizacion?.lleva_pantone && (
+        <div style={{ background: "#FFF9E8", border: `1.5px solid ${C.amber}`, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: C.text, marginBottom: 12 }}>
+          🎨 Esta cotización lleva Pantone: <b>{cotizacion.pantones || "(sin especificar cuáles)"}</b> — selecciona el proveedor abajo para cotizarlo.
+        </div>
+      )}
+
+      <SelectorCosto titulo="Pantone" cats={["impresion"]} patronNombre="pantone"
+        servicioId={colorExtraServicioId} provId={colorExtraProvId}
+        setServ={setColorExtraServicioId} setProv={setColorExtraProvId}
+        costo={costoColorExtra} unidadNota="(total)" cantidadReal={pliegos} />
+      {colorExtraServicioId && (
+        <div style={{ marginTop: -8, marginBottom: 12 }}>
+          <label style={labelStyle}>Cuántos Pantones{cotizacion?.pantones ? " (" + cotizacion.pantones + ")" : ""}</label>
+          <input type="number" min="1" value={colorExtraCantidad} onChange={e => setColorExtraCantidad(e.target.value)}
+            style={{ ...inputStyle, maxWidth: 120 }} />
+        </div>
+      )}
+
+      <SelectorCosto titulo="Barniz máquina" cats={["acabado"]} patronNombre="barniz"
+        servicioId={barnizServicioId} provId={barnizProvId}
+        setServ={setBarnizServicioId} setProv={setBarnizProvId}
+        costo={costoBarniz} unidadNota="(total)" cantidadReal={pliegos} />
 
       {/* Acabados (múltiples) */}
       <div style={{ ...cardStyle, marginBottom: 12 }}>
@@ -1443,22 +1915,22 @@ function Cotizador({ cotizacion, calcData }) {
           {costoAcabados > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costoAcabados)}</div>}
         </div>
         {acabados.map(a => {
-          const provs = a.servicioId ? provsConPrecio(a.servicioId) : [];
-          const costoA = a.servicioId && a.provId
-            ? ((a.base === "pliegos" ? pliegos : qty) / 1000) * (precioDe(a.provId, a.servicioId) || 0) : 0;
+          const unidadesA = a.base === "pliegos" ? pliegos : qty;
+          const provs = a.servicioId ? provsConPrecio(a.servicioId, unidadesA) : [];
+          const costoA = a.servicioId && a.provId ? (costoDe(a.provId, a.servicioId, unidadesA) || 0) : 0;
           return (
             <div key={a.key} style={{ background: C.bg, border: "1.5px solid " + C.border, borderRadius: 8, padding: 10, marginBottom: 8 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
                 <select value={a.servicioId}
                   onChange={e => {
                     const sid = e.target.value;
-                    const ps = provsConPrecio(sid);
+                    const ps = provsConPrecio(sid, unidadesA);
                     updAcabado(a.key, { servicioId: sid, provId: ps.length ? ps[0].id : "" });
                   }}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
                   <option value="">— Servicio —</option>
-                  {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido"]).map(s =>
-                    <option key={s.id} value={s.id}>{etiquetaServicio(s)}</option>)}
+                  {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido"], unidadesA).map(s =>
+                    <option key={s.id} value={s.id}>{etiquetaServicio(s, unidadesA)}</option>)}
                 </select>
                 <select value={a.provId} onChange={e => updAcabado(a.key, { provId: e.target.value })}
                   disabled={provs.length === 0}
@@ -1519,9 +1991,11 @@ function Cotizador({ cotizacion, calcData }) {
         {[
           papelServicioId && { label: "Papel · " + nombreServicio(papelServicioId), prov: nombreProv(papelProvId), v: costoPapel },
           impServicioId && { label: "Impresión · " + nombreServicio(impServicioId), prov: nombreProv(impProvId), v: costoImp },
+          colorExtraServicioId && { label: "Pantone · " + nombreServicio(colorExtraServicioId), prov: nombreProv(colorExtraProvId), v: costoColorExtra },
+          barnizServicioId && { label: "Barniz máquina · " + nombreServicio(barnizServicioId), prov: nombreProv(barnizProvId), v: costoBarniz },
           ...acabados.filter(a => a.servicioId && a.provId).map(a => ({
             label: "Acabado · " + nombreServicio(a.servicioId), prov: nombreProv(a.provId),
-            v: ((a.base === "pliegos" ? pliegos : qty) / 1000) * (precioDe(a.provId, a.servicioId) || 0),
+            v: costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty) || 0,
           })),
           costoFlete > 0 && { label: "Flete", prov: "", v: costoFlete },
           costoExtras > 0 && { label: "Extras", prov: "", v: costoExtras },
@@ -1553,6 +2027,72 @@ function Cotizador({ cotizacion, calcData }) {
       <button onClick={copiarDesglose} disabled={costoTotal <= 0} style={btn(costoTotal > 0 ? C.coral : C.muted, true)}>
         📋 Copiar desglose
       </button>
+
+      {pasosConFechas.length > 0 && (
+        <div style={{ ...cardStyle, marginTop: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>⏱ Cronograma de producción</div>
+            <div>
+              <label style={{ fontSize: 11, color: C.muted, marginRight: 6 }}>Inicia:</label>
+              <input type="date" value={fechaInicio} onChange={e => setFechaInicio(e.target.value)}
+                style={{ ...inputStyle, width: 150, padding: "5px 8px", fontSize: 12 }} />
+            </div>
+          </div>
+
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+            ✓ verde = calculado con datos reales del proveedor. Los demás (sin ✓) son estimados editables — captúrale el tiempo real a tus proveedores en 🏭 Proveedores → Precios para que se calculen solos.
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {pasosConFechas.map(p => (
+              <div key={p.key} style={{ display: "grid", gridTemplateColumns: "1fr 90px 1fr", gap: 10, alignItems: "center",
+                background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px" }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>{p.nombre}</div>
+                {p.editable ? (
+                  <input type="number" min="0" step="0.5" value={p.horas}
+                    onChange={e => setDuracionesManual(prev => ({ ...prev, [p.key]: parseFloat(e.target.value) || 0 }))}
+                    style={{ ...inputStyle, padding: "5px 8px", fontSize: 12, textAlign: "right" }} title="Estimado — no hay tiempo capturado, ajústalo si lo sabes" />
+                ) : (
+                  <div style={{ fontSize: 12, textAlign: "right", fontWeight: 700, color: C.green }} title="Calculado con datos reales del proveedor">✓ {p.horas.toFixed(1)}h</div>
+                )}
+                <div style={{ fontSize: 11.5, color: C.muted, textAlign: "right" }}>→ {fmtFecha(p.fin)}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, paddingTop: 10, borderTop: `1.5px solid ${C.border}` }}>
+            <div style={{ fontSize: 12, color: C.muted }}>Total: <b style={{ color: C.text }}>{horasTotales.toFixed(1)} horas</b></div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>Entrega estimada: {fmtFecha(fechaEntregaEstimada)}</div>
+          </div>
+
+          <button onClick={() => {
+            const id = cotizacion?.cot_id || trabajoIdRef.current;
+            const proveedoresUsados = [];
+            const addProv = (pid) => {
+              if (!pid || proveedoresUsados.some(x => x.id === pid)) return;
+              const p = proveedores.find(x => x.id === pid);
+              if (p) proveedoresUsados.push({ id: p.id, nombre: p.nombre });
+            };
+            addProv(papelProvId); addProv(impProvId); addProv(colorExtraProvId); addProv(barnizProvId);
+            acabados.forEach(a => addProv(a.provId));
+            upsertCronogramaTrabajo({
+              id,
+              nombre: cotizacion?.nombre_proyecto || "Cotización sin nombre",
+              cliente: cotizacion?.cliente || "",
+              fechaInicio: fechaInicio,
+              fechaEntregaEstimada: fechaEntregaEstimada ? fechaEntregaEstimada.toISOString() : null,
+              horasTotales,
+              proveedoresUsados,
+              pasos: pasosConFechas.map(p => ({ nombre: p.nombre, inicio: p.inicio?.toISOString(), fin: p.fin?.toISOString() })),
+              actualizado: new Date().toISOString(),
+            });
+            setGuardadoCronograma(true);
+            setTimeout(() => setGuardadoCronograma(false), 2000);
+          }} style={{ ...btn(guardadoCronograma ? C.green : C.navy, true), marginTop: 10, width: "100%" }}>
+            {guardadoCronograma ? "✓ Guardado en el cronograma general" : "📌 Guardar este trabajo en el cronograma general"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1675,6 +2215,207 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
         <button onClick={onCancelar} style={{ ...btn(C.muted), background: "none", color: C.muted, border: `1.5px solid ${C.border}` }}>
           Cancelar
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MÓDULO: Cronograma general — vista tipo Gantt de todos los trabajos guardados
+// ═══════════════════════════════════════════════════════════════════════════════
+function CronogramaGeneral() {
+  const [trabajos, setTrabajos] = useState(() => loadCronogramaTrabajos());
+  const [registrando, setRegistrando] = useState(null); // trabajo actual siendo calificado
+
+  const quitar = (id) => {
+    const nuevo = trabajos.filter(t => t.id !== id);
+    setTrabajos(nuevo);
+    saveCronogramaTrabajos(nuevo);
+  };
+
+  const marcarCompletado = (id, fechaRealEntrega) => {
+    const nuevo = trabajos.map(t => t.id === id ? { ...t, completado: true, fechaRealEntrega } : t);
+    setTrabajos(nuevo);
+    saveCronogramaTrabajos(nuevo);
+  };
+
+  const activos = trabajos.filter(t => t.fechaInicio && t.fechaEntregaEstimada && !t.completado);
+  const completados = trabajos.filter(t => t.completado).sort((a, b) => new Date(b.fechaRealEntrega) - new Date(a.fechaRealEntrega));
+
+  const fmtCorto = (t) => new Date(t).toLocaleDateString("es-MX", { day: "numeric", month: "short" });
+
+  if (activos.length === 0 && completados.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: 40, color: C.muted }}>
+        <div style={{ fontSize: 32, marginBottom: 10 }}>📅</div>
+        <div style={{ fontSize: 14 }}>Todavía no has guardado ningún trabajo en el cronograma.</div>
+        <div style={{ fontSize: 12, marginTop: 6 }}>Ve a 💵 Cotizar, arma el cronograma de una cotización y dale "📌 Guardar este trabajo en el cronograma general".</div>
+      </div>
+    );
+  }
+
+  const ahora = Date.now();
+  const inicios = activos.map(t => new Date(t.fechaInicio + "T08:00:00").getTime());
+  const fines = activos.map(t => new Date(t.fechaEntregaEstimada).getTime());
+  const minT = Math.min(...(inicios.length ? inicios : [ahora]), ahora);
+  const maxT = Math.max(...(fines.length ? fines : [ahora]), ahora);
+  const pad = Math.max((maxT - minT) * 0.08, 12 * 3600 * 1000);
+  const rangeMin = minT - pad, rangeMax = maxT + pad, span = rangeMax - rangeMin || 1;
+  const pct = (t) => ((t - rangeMin) / span) * 100;
+  const hoyPct = pct(ahora);
+
+  // Ordena por fecha de inicio, para que el cronograma se lea de arriba a abajo en el tiempo
+  const ordenados = [...activos].sort((a, b) => new Date(a.fechaInicio) - new Date(b.fechaInicio));
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy }}>📅 Cronograma general</div>
+        {activos.length > 0 && <div style={{ fontSize: 12, color: C.muted }}>{fmtCorto(rangeMin)} — {fmtCorto(rangeMax)}</div>}
+      </div>
+
+      {activos.length > 0 && (
+        <div style={cardStyle}>
+          <div style={{ position: "relative" }}>
+            {/* Línea de "HOY" atravesando todas las filas */}
+            <div style={{ position: "absolute", left: hoyPct + "%", top: 0, bottom: 0, width: 2, background: C.coral, zIndex: 2 }} />
+            <div style={{ position: "absolute", left: hoyPct + "%", top: -18, transform: "translateX(-50%)",
+              fontSize: 10, fontWeight: 700, color: C.coral, zIndex: 2, background: C.card, padding: "0 4px" }}>HOY</div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
+              {ordenados.map(t => {
+                const iT = new Date(t.fechaInicio + "T08:00:00").getTime();
+                const fT = new Date(t.fechaEntregaEstimada).getTime();
+                const vencido = fT < ahora;
+                const left = pct(iT), width = Math.max(pct(fT) - pct(iT), 1.5);
+                return (
+                  <div key={t.id}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>
+                        {t.nombre}{t.cliente ? <span style={{ color: C.muted, fontWeight: 400 }}> · {t.cliente}</span> : ""}
+                      </div>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        <button onClick={() => setRegistrando(t)}
+                          style={{ border: "none", background: "none", color: C.green, cursor: "pointer", fontSize: 11, fontWeight: 700 }}>✅ Entregado</button>
+                        <button onClick={() => quitar(t.id)} title="Quitar del cronograma"
+                          style={{ border: "none", background: "none", color: C.muted, cursor: "pointer", fontSize: 13 }}>✕</button>
+                      </div>
+                    </div>
+                    <div style={{ position: "relative", height: 26, background: C.bg, borderRadius: 6, border: `1px solid ${C.border}` }}>
+                      <div title={fmtCorto(iT) + " → " + fmtCorto(fT) + " (" + (t.horasTotales || 0).toFixed(1) + "h)"}
+                        style={{ position: "absolute", left: left + "%", width: width + "%", top: 2, bottom: 2,
+                          background: vencido ? C.coral : C.cyan, borderRadius: 5,
+                          display: "flex", alignItems: "center", paddingLeft: 8, overflow: "hidden",
+                          fontSize: 10.5, fontWeight: 700, color: "#fff", whiteSpace: "nowrap" }}>
+                        {(t.horasTotales || 0).toFixed(0)}h
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activos.length > 0 && (
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 10, marginBottom: 20 }}>
+          🔵 en tiempo · 🔴 la fecha de entrega ya pasó · la línea roja vertical es HOY.
+        </div>
+      )}
+
+      {registrando && (
+        <RegistrarEntrega trabajo={registrando}
+          onCancelar={() => setRegistrando(null)}
+          onGuardado={(fechaReal) => { marcarCompletado(registrando.id, fechaReal); setRegistrando(null); }} />
+      )}
+
+      {completados.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: C.navy, marginBottom: 10 }}>✅ Entregados</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {completados.map(t => (
+              <div key={t.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+                <div>
+                  <span style={{ fontWeight: 600, color: C.text }}>{t.nombre}</span>
+                  {t.cliente ? <span style={{ color: C.muted }}> · {t.cliente}</span> : ""}
+                  <span style={{ color: C.muted }}> · entregado {fmtCorto(t.fechaRealEntrega)}</span>
+                </div>
+                <button onClick={() => quitar(t.id)} style={{ border: "none", background: "none", color: C.muted, cursor: "pointer", fontSize: 13 }}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RegistrarEntrega({ trabajo, onGuardado, onCancelar }) {
+  const [fechaReal, setFechaReal] = useState(() => new Date().toISOString().slice(0, 10));
+  const [notas, setNotas] = useState("");
+  const [calificaciones, setCalificaciones] = useState({}); // { provId: 1-5 }
+  const [guardando, setGuardando] = useState(false);
+
+  const proveedores = trabajo.proveedoresUsados || [];
+
+  const guardar = async () => {
+    setGuardando(true);
+    const fechaRealISO = new Date(fechaReal + "T17:00:00").toISOString();
+    for (const p of proveedores) {
+      const cal = calificaciones[p.id];
+      if (cal > 0) {
+        await registrarEntregaDB({
+          proveedorId: p.id, trabajoNombre: trabajo.nombre,
+          fechaPrometida: trabajo.fechaEntregaEstimada, fechaReal: fechaRealISO,
+          calificacion: cal, notas,
+        });
+      }
+    }
+    setGuardando(false);
+    onGuardado(fechaRealISO);
+  };
+
+  return (
+    <div style={{ ...cardStyle, borderColor: C.green, marginBottom: 20 }}>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: C.navy, marginBottom: 4 }}>
+        ✅ Marcar "{trabajo.nombre}" como entregado
+      </div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 14 }}>Prometido: {new Date(trabajo.fechaEntregaEstimada).toLocaleDateString("es-MX", { day: "numeric", month: "short" })}</div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={labelStyle}>Fecha real de entrega</label>
+        <input type="date" value={fechaReal} onChange={e => setFechaReal(e.target.value)} style={{ ...inputStyle, maxWidth: 200 }} />
+      </div>
+
+      {proveedores.length === 0 && (
+        <div style={{ fontSize: 12, color: C.coral, marginBottom: 12 }}>Este trabajo no tiene proveedores guardados para calificar (se guardó antes de este cambio).</div>
+      )}
+
+      {proveedores.map(p => (
+        <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+          background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{p.nombre}</div>
+          <div>
+            {[1, 2, 3, 4, 5].map(n => (
+              <span key={n} onClick={() => setCalificaciones(prev => ({ ...prev, [p.id]: n === prev[p.id] ? 0 : n }))}
+                style={{ cursor: "pointer", fontSize: 18, color: n <= (calificaciones[p.id] || 0) ? "#F5A623" : C.border }}>★</span>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      <div style={{ marginTop: 10, marginBottom: 14 }}>
+        <label style={labelStyle}>Notas (opcional)</label>
+        <input value={notas} onChange={e => setNotas(e.target.value)} placeholder="Ej: llegó bien, pero un día tarde" style={inputStyle} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={guardar} disabled={guardando} style={btn(guardando ? C.muted : C.green)}>
+          {guardando ? "Guardando…" : "Guardar entrega"}
+        </button>
+        <button onClick={onCancelar} style={{ ...btn(C.muted, true), background: "none", border: `1.5px solid ${C.border}` }}>Cancelar</button>
       </div>
     </div>
   );
@@ -2072,7 +2813,7 @@ function AdminTemplates() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Envío de solicitud
 // ═══════════════════════════════════════════════════════════════════════════════
-function EnvioSolicitud({ calcData, cotizacion }) {
+function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado }) {
   const [proveedorNombre, setProveedorNombre] = useState("");
   const [proveedorEmail, setProveedorEmail]   = useState("");
   const [proveedorTel, setProveedorTel]       = useState("");
@@ -2112,6 +2853,9 @@ function EnvioSolicitud({ calcData, cotizacion }) {
     gramaje:          calcData ? calcData.gramaje + " g/m2" : "—",
     merma:            calcData ? calcData.merma + "%" : "—",
     fecha:            new Date().toLocaleDateString("es-MX"),
+    tiempo_estimado:  tiempoEstimado?.fechaEntregaEstimada
+      ? new Date(tiempoEstimado.fechaEntregaEstimada).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" })
+      : (tiempoEstimado ? formatoHoras(tiempoEstimado.horas) + " (" + tiempoEstimado.maquinaNombre + ")" : "—"),
   });
 
   const tplBase = savedTemplates[tipoServicio] || DEFAULT_TEMPLATES[tipoServicio] || "";
@@ -2173,6 +2917,18 @@ function EnvioSolicitud({ calcData, cotizacion }) {
           </div>
         )}
       </div>
+
+      {tiempoEstimado && (
+        <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: C.text, marginBottom: 12 }}>
+          {tiempoEstimado.horas != null && (
+            <div>⏱ Tiempo estimado de impresión: <b>{formatoHoras(tiempoEstimado.horas)}</b> en {tiempoEstimado.maquinaNombre}</div>
+          )}
+          {tiempoEstimado.fechaEntregaEstimada && (
+            <div>📅 Entrega estimada del cronograma completo: <b>{new Date(tiempoEstimado.fechaEntregaEstimada).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" })}</b> ({tiempoEstimado.horasTotales?.toFixed(1)}h totales)</div>
+          )}
+          Disponible como <code>{"{{tiempo_estimado}}"}</code> en tus plantillas.
+        </div>
+      )}
 
       {/* ── Card único: Producto + Info + Mensaje ── */}
       <div style={{ ...cardStyle, borderColor: C.cyan }}>
@@ -2363,6 +3119,8 @@ const emptyCotizacion = () => ({
   tamano_extendido: "",
   tamano_final: "",
   num_tintas: "",
+  tintas_frente: "",
+  tintas_vuelta: "",
   lleva_pantone: false,
   pantones: "",
   maquilar_acabados: false,
@@ -2607,11 +3365,24 @@ function SolicitudCotizacion({ onGuardar }) {
                 placeholder="Ej: 21×29 cm" style={inputStyle} />
             </Field>
           </div>
-          <Field label="Número de tintas" required>
-            <textarea value={cot.num_tintas} onChange={e => set("num_tintas", e.target.value)}
-              placeholder="¿A cuántas tintas va tu proyecto?"
-              style={{ ...inputStyle, height: 60, resize: "vertical" }} />
-          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px" }}>
+            <Field label="Tintas frente" required>
+              <input type="number" min="0" value={cot.tintas_frente}
+                onChange={e => {
+                  const v = e.target.value;
+                  setCot(prev => ({ ...prev, tintas_frente: v, num_tintas: v + "/" + (prev.tintas_vuelta || "0") }));
+                }}
+                placeholder="Ej: 4" style={inputStyle} />
+            </Field>
+            <Field label="Tintas vuelta">
+              <input type="number" min="0" value={cot.tintas_vuelta}
+                onChange={e => {
+                  const v = e.target.value;
+                  setCot(prev => ({ ...prev, tintas_vuelta: v, num_tintas: (prev.tintas_frente || "0") + "/" + v }));
+                }}
+                placeholder="Ej: 0 (si es un solo lado)" style={inputStyle} />
+            </Field>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 16px", alignItems: "start" }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <CheckRow checked={cot.lleva_pantone} onChange={v => set("lleva_pantone", v)} label="La impresión lleva Pantone" />
@@ -2739,7 +3510,7 @@ function HistorialCotizaciones({ onCargar, onDuplicar, onVolver }) {
 
   const gruposArr = Object.entries(grupos)
     .map(([id, versiones]) => ({ id, versiones, nombre: versiones[0].nombre_proyecto || "Sin nombre", ultimo: versiones[0].ts_display }))
-    .filter(g => !busqueda || g.nombre.toLowerCase().includes(busqueda.toLowerCase()));
+    .filter(g => !busqueda || normalizarTexto(g.nombre).includes(normalizarTexto(busqueda)));
 
   const COLS = {
     cantidad:     "Cantidad",
@@ -2860,6 +3631,7 @@ function HistorialCotizaciones({ onCargar, onDuplicar, onVolver }) {
 export default function App() {
   const [tab, setTab] = useState("cotizacion");
   const [calcData, setCalcData]     = useState(null);
+  const [tiempoEstimado, setTiempoEstimado] = useState(null); // {horas, maquinaNombre} o null
   const [cotizacion, setCotizacion] = useState(() => {
     const saved = localStorage.getItem("mrblue_cot_activa");
     return saved ? JSON.parse(saved) : null;
@@ -2871,6 +3643,7 @@ export default function App() {
     { key: "cotizar",    label: "💵 Cotizar"          },
     { key: "envio",      label: "✉ Enviar solicitud"  },
     { key: "seg",        label: "📋 Seguimiento"       },
+    { key: "cronograma", label: "📅 Cronograma"        },
     { key: "admin",      label: "🏭 Proveedores"       },
     { key: "templates",  label: "📝 Templates"         },
   ];
@@ -2938,9 +3711,10 @@ export default function App() {
             )}
           </>
         )}
-        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} />}
-        {tab === "envio"     && <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} />}
+        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} onTiempoEstimado={setTiempoEstimado} />}
+        {tab === "envio"     && <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} tiempoEstimado={tiempoEstimado} />}
         {tab === "seg"       && <Seguimiento />}
+        {tab === "cronograma" && <CronogramaGeneral />}
         {tab === "admin"     && <AdminProveedores />}
         {tab === "templates" && <AdminTemplates />}
       </div>
