@@ -301,6 +301,18 @@ function formatoHoras(h) {
   return horas + "h" + (min > 0 ? " " + min + "min" : "");
 }
 
+// Cuando un proveedor tiene varias máquinas con precios distintos para el mismo
+// servicio (ej. Impresión en su prensa chica vs. la grande), los escalones se
+// guardan bajo una llave compuesta "servicioId__m__maquinaId". Sin máquina
+// específica (precio general del proveedor) se usa la llave simple de siempre.
+function claveEscalon(servicioId, maquinaId) {
+  return maquinaId ? `${servicioId}__m__${maquinaId}` : servicioId;
+}
+function parseClaveEscalon(clave) {
+  const i = clave.indexOf("__m__");
+  return i === -1 ? { servicioId: clave, maquinaId: null } : { servicioId: clave.slice(0, i), maquinaId: clave.slice(i + 5) };
+}
+
 function seleccionarEscalon(escalones, qty) {
   const q = Math.max(0, parseFloat(qty) || 0);
   const activos = (escalones || []).filter(e => e.precio !== "" && e.precio != null);
@@ -316,20 +328,26 @@ function seleccionarEscalon(escalones, qty) {
 }
 
 // La cantidad de referencia para elegir escalón, según la unidad del servicio.
+// IMPORTANTE: para "por_millar" los escalones se capturan en PLIEGOS/PIEZAS REALES
+// (ej. "Desde 1 Hasta 1000", "Desde 1001 Hasta 2000"), no en "número de millar" —
+// así que aquí solo se redondea al millar cerrado, sin dividir entre 1000.
 function qtyRefParaEscalon(unidad_precio, qty) {
-  if (unidad_precio === "por_millar") return qty / 1000;
+  if (unidad_precio === "por_millar") return Math.ceil((parseFloat(qty) || 0) / 1000) * 1000;
   if (unidad_precio === "fijo") return 0;
-  return qty; // por_pieza, unidad, por_kg
+  return qty; // por_pieza, unidad, por_kg, por_m2 (el escalón se busca por cantidad de piezas/pliegos)
 }
 
 // Costo real para una cantidad dada, según la unidad del servicio.
 // Devuelve null si no se puede calcular automáticamente (por_kg necesita el peso real).
-function costoServicioPorCantidad(unidad_precio, precio, qty) {
+// areaM2PorUnidad: solo aplica a "por_m2" — el área (en m²) de UNA pieza o UN pliego,
+// según a qué se le esté aplicando el barniz/laminado.
+function costoServicioPorCantidad(unidad_precio, precio, qty, areaM2PorUnidad) {
   const p = parseFloat(precio) || 0;
   const q = Math.max(0, parseFloat(qty) || 0);
-  if (unidad_precio === "por_millar") return (q / 1000) * p;
+  if (unidad_precio === "por_millar") return Math.ceil(q / 1000) * p;
   if (unidad_precio === "por_pieza" || unidad_precio === "unidad") return q * p;
   if (unidad_precio === "fijo") return p;
+  if (unidad_precio === "por_m2") return areaM2PorUnidad > 0 ? q * areaM2PorUnidad * p : null;
   return null;
 }
 
@@ -365,6 +383,32 @@ function upsertCronogramaTrabajo(trabajo) {
   return lista;
 }
 
+// ── Tabla de merma para cotizar (Anexo 6, Manual de Procedimientos — Proceso Comercial) ──
+// Para tirajes chicos es un número fijo de hojas; para los demás rangos es un %, y
+// cuando el rango trae "X% al Y%" se interpola en línea recta dentro del rango.
+const TABLA_MERMA_IMPRESION = [
+  { min: 0,      max: 3000,    tipo: "hojas", val: 300 },
+  { min: 3001,   max: 10000,   tipo: "pct",   val: 8 },
+  { min: 10001,  max: 20000,   tipo: "pct_rango", desde: 8,   hasta: 6 },
+  { min: 20001,  max: 40000,   tipo: "pct",   val: 5 },
+  { min: 40001,  max: 60000,   tipo: "pct",   val: 4 },
+  { min: 60001,  max: 100000,  tipo: "pct_rango", desde: 4,   hasta: 2 },
+  { min: 100001, max: 300000,  tipo: "pct_rango", desde: 2.5, hasta: 1.5 }, // 300,000 es un techo razonable para interpolar; de ahí en adelante se queda en 1.5%
+];
+
+// Devuelve { tipo: 'hojas'|'pct', valor } — hojas = número fijo de pliegos extra;
+// pct = porcentaje a aplicar sobre el tiraje.
+function mermaBaseImpresion(tiraje) {
+  const q = Math.max(0, parseFloat(tiraje) || 0);
+  const fila = TABLA_MERMA_IMPRESION.find(f => q >= f.min && q <= f.max) || TABLA_MERMA_IMPRESION[TABLA_MERMA_IMPRESION.length - 1];
+  if (fila.tipo === "hojas") return { tipo: "hojas", valor: fila.val };
+  if (fila.tipo === "pct") return { tipo: "pct", valor: fila.val };
+  // pct_rango: interpola en línea recta entre desde→hasta según dónde cae q en el rango
+  const t = fila.max > fila.min ? Math.min(1, Math.max(0, (q - fila.min) / (fila.max - fila.min))) : 0;
+  const valor = fila.desde + (fila.hasta - fila.desde) * t;
+  return { tipo: "pct", valor: Math.round(valor * 100) / 100 };
+}
+
 function fmtP(n) {
   if (!n && n !== 0) return "—";
   return Number(n).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -381,6 +425,7 @@ function FichaPrecios({ prov, onSave }) {
   const [categoriaAbierta, setCategoriaAbierta] = useState("");
   const [soloConPrecio, setSoloConPrecio] = useState(true);
   const [saved, setSaved] = useState(false);
+  const [maquinaSelPorServicio, setMaquinaSelPorServicio] = useState({}); // { [servicioId]: maquinaId | null(=General) }
 
   useEffect(() => {
     let vivo = true;
@@ -395,6 +440,15 @@ function FichaPrecios({ prov, onSave }) {
           escalones: existentes.length ? existentes.map(e => ({ ...e })) : [nuevoEscalon()],
           historial: prov.precios?.[s.id]?.historial || [],
         };
+      });
+      // Conserva también los precios específicos por máquina (llave "servicioId__m__maquinaId")
+      Object.keys(prov.precios || {}).forEach(k => {
+        if (k.includes("__m__")) {
+          base[k] = {
+            escalones: (prov.precios[k].escalones || []).map(e => ({ ...e })),
+            historial: prov.precios[k].historial || [],
+          };
+        }
       });
       setPrecios(base);
       const categorias = [...new Set(cat.map(s => s.categoria))];
@@ -451,8 +505,10 @@ function FichaPrecios({ prov, onSave }) {
   };
 
   const categorias = [...new Set(catalogo.map(s => s.categoria))];
+  const tieneAlgunPrecio = (s) =>
+    Object.keys(precios).some(k => (k === s.id || k.startsWith(s.id + "__m__")) && (precios[k].escalones || []).some(e => parseFloat(e.precio) > 0));
   const categoriasConPrecio = categorias.filter(cat =>
-    catalogo.some(s => s.categoria === cat && (precios[s.id]?.escalones || []).some(e => parseFloat(e.precio) > 0))
+    catalogo.some(s => s.categoria === cat && tieneAlgunPrecio(s))
   );
   const categoriasVisibles = soloConPrecio ? categoriasConPrecio : categorias;
 
@@ -487,7 +543,8 @@ function FichaPrecios({ prov, onSave }) {
     );
   }
 
-  const unidadLabel = { por_millar: "$ / millar", por_pieza: "$ / pieza", unidad: "$ / unidad", por_kg: "$ / kg", fijo: "$ (costo único)" };
+  const unidadLabel = { por_millar: "$ / millar", por_pieza: "$ / pieza", unidad: "$ / unidad", por_kg: "$ / kg", por_m2: "$ / m²", fijo: "$ (costo único)" };
+  const rangoUnidadLabel = { por_millar: "pliegos/piezas reales — ej. 1 a 1000, 1001 a 2000…", por_pieza: "piezas", unidad: "unidades", por_kg: "kg", por_m2: "pliegos o piezas (el precio ya se multiplica por su área en m²)" };
 
   return (
     <div style={{ marginTop: 14 }}>
@@ -529,9 +586,11 @@ function FichaPrecios({ prov, onSave }) {
 
       {catalogo
         .filter(s => s.categoria === categoriaAbierta)
-        .filter(s => !soloConPrecio || (precios[s.id]?.escalones || []).some(e => parseFloat(e.precio) > 0))
+        .filter(s => !soloConPrecio || tieneAlgunPrecio(s))
         .map(s => {
-        const d = precios[s.id] || { escalones: [nuevoEscalon()], historial: [] };
+        const maquinaSel = maquinaSelPorServicio[s.id] ?? null; // null = "General"
+        const claveActiva = claveEscalon(s.id, maquinaSel);
+        const d = precios[claveActiva] || { escalones: [nuevoEscalon()], historial: [] };
         const esFijo = s.unidad_precio === "fijo";
 
         return (
@@ -541,6 +600,29 @@ function FichaPrecios({ prov, onSave }) {
               {esFijo && <span style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginLeft: 6 }}>(costo único por proyecto)</span>}
             </div>
 
+            {prov.maquinas && prov.maquinas.length > 1 && !esFijo && (
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", padding: "4px 12px 8px" }}>
+                <button onClick={() => setMaquinaSelPorServicio(prev => ({ ...prev, [s.id]: null }))}
+                  style={{ fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 20, cursor: "pointer",
+                    background: maquinaSel === null ? C.navy : C.card, color: maquinaSel === null ? "#fff" : C.muted,
+                    border: `1.5px solid ${maquinaSel === null ? C.navy : C.border}` }}>General (cualquier máquina)</button>
+                {prov.maquinas.map(m => (
+                  <button key={m.id} onClick={() => setMaquinaSelPorServicio(prev => ({ ...prev, [s.id]: m.id }))}
+                    style={{ fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 20, cursor: "pointer",
+                      background: maquinaSel === m.id ? C.cyan : C.card, color: maquinaSel === m.id ? "#fff" : C.muted,
+                      border: `1.5px solid ${maquinaSel === m.id ? C.cyan : C.border}` }}>
+                    {m.nombre || "Máquina sin nombre"}
+                    {(precios[claveEscalon(s.id, m.id)]?.escalones || []).some(e => parseFloat(e.precio) > 0) ? " ✓" : ""}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {!esFijo && (
+              <div style={{ padding: "0 12px", fontSize: 10.5, color: C.muted }}>
+                "Desde"/"Hasta" son {rangoUnidadLabel[s.unidad_precio] || "cantidad real"} — no "número de millar".
+              </div>
+            )}
             {!esFijo && (
               <div style={{ display: "grid", gridTemplateColumns: "80px 80px 1fr 70px 32px", gap: "0 8px",
                 padding: "0 12px 4px", fontSize: 10, fontWeight: 700, color: C.muted,
@@ -554,34 +636,34 @@ function FichaPrecios({ prov, onSave }) {
                 gridTemplateColumns: esFijo ? "1fr 70px 32px" : "80px 80px 1fr 70px 32px",
                 gap: 8, padding: "4px 12px", alignItems: "center" }}>
                 {!esFijo && <>
-                  <input value={e.tiraje_min} onChange={ev => updateEscalon(s.id, idx, "tiraje_min", ev.target.value)}
+                  <input value={e.tiraje_min} onChange={ev => updateEscalon(claveActiva, idx, "tiraje_min", ev.target.value)}
                     type="number" placeholder="1" title="Cantidad mínima"
                     style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
-                  <input value={e.tiraje_max} onChange={ev => updateEscalon(s.id, idx, "tiraje_max", ev.target.value)}
+                  <input value={e.tiraje_max} onChange={ev => updateEscalon(claveActiva, idx, "tiraje_max", ev.target.value)}
                     type="number" placeholder="en adelante" title="Cantidad máxima (vacío = en adelante)"
                     style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
                 </>}
                 <div style={{ position: "relative" }}>
                   <span style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
-                  <input value={e.precio} onChange={ev => updateEscalon(s.id, idx, "precio", ev.target.value)}
+                  <input value={e.precio} onChange={ev => updateEscalon(claveActiva, idx, "precio", ev.target.value)}
                     type="number" step="0.01" placeholder="0.00"
                     style={{ ...inputStyle, paddingLeft: 18, fontSize: 12, textAlign: "right", padding: "6px 8px 6px 18px" }} />
                 </div>
-                <input value={e.tiempo_horas} onChange={ev => updateEscalon(s.id, idx, "tiempo_horas", ev.target.value)}
+                <input value={e.tiempo_horas} onChange={ev => updateEscalon(claveActiva, idx, "tiempo_horas", ev.target.value)}
                   type="number" step="0.5" placeholder="—" title="Tiempo estimado (horas) para este escalón"
                   style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
-                <button onClick={() => removeEscalon(s.id, idx)} title="Quitar escalón"
+                <button onClick={() => removeEscalon(claveActiva, idx)} title="Quitar escalón"
                   style={{ border: `1px solid ${C.red}`, color: C.red, background: "none", borderRadius: 7, cursor: "pointer", height: 28 }}>×</button>
               </div>
             ))}
 
             <div style={{ padding: "4px 12px 8px" }}>
               {!esFijo && (
-                <button onClick={() => addEscalon(s.id)} style={{ ...btn(C.card, true), color: C.navy, border: `1.5px dashed ${C.border}`, fontSize: 11, padding: "5px 10px" }}>
+                <button onClick={() => addEscalon(claveActiva)} style={{ ...btn(C.card, true), color: C.navy, border: `1.5px dashed ${C.border}`, fontSize: 11, padding: "5px 10px" }}>
                   + Agregar escalón
                 </button>
               )}
-              <input value={d.escalones[0]?.notas || ""} onChange={ev => updateEscalon(s.id, 0, "notas", ev.target.value)}
+              <input value={d.escalones[0]?.notas || ""} onChange={ev => updateEscalon(claveActiva, 0, "notas", ev.target.value)}
                 placeholder="Notas (incluye setup, planchas, condiciones especiales…)"
                 style={{ ...inputStyle, fontSize: 11, padding: "4px 8px", color: C.muted, marginTop: 6 }} />
             </div>
@@ -601,7 +683,7 @@ function FichaPrecios({ prov, onSave }) {
         );
       })}
 
-      {catalogo.filter(s => s.categoria === categoriaAbierta).filter(s => !soloConPrecio || (precios[s.id]?.escalones || []).some(e => parseFloat(e.precio) > 0)).length === 0 && (
+      {catalogo.filter(s => s.categoria === categoriaAbierta).filter(s => !soloConPrecio || tieneAlgunPrecio(s)).length === 0 && (
         <div style={{ color: C.muted, fontSize: 12, padding: "10px 4px" }}>
           {soloConPrecio ? "Ningún servicio de esta categoría tiene precio cargado todavía." : "Sin servicios en esta categoría."}
         </div>
@@ -623,13 +705,13 @@ function FichaPrecios({ prov, onSave }) {
 
 async function loadProveedoresDB() {
   const { data: provs, error: e1 } = await supabase
-    .from("proveedores").select("id, nombre, tipo, calificacion").order("nombre");
+    .from("proveedores").select("id, nombre, tipo, calificacion, merma_personalizada").order("nombre");
   if (e1) { console.error(e1); return []; }
 
   const { data: maqs } = await supabase.from("maquinas").select("*");
   const { data: tarifas } = await supabase
     .from("tarifas")
-    .select("id, proveedor_id, servicio_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at")
+    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at")
     .order("tiraje_min", { ascending: true, nullsFirst: true });
 
   return (provs || []).map(p => {
@@ -644,25 +726,26 @@ async function loadProveedoresDB() {
         velocidadHora: m.velocidad_hora ?? "",
       }));
 
-    // precios[servicio_id] = { escalones: [{id, tiraje_min, tiraje_max, precio, notas}], historial: [todas las filas, incl. inactivas] }
+    // precios[claveEscalon(servicio_id, maquina_id)] = { escalones: [{id, tiraje_min, tiraje_max, precio, notas}], historial: [...] }
+    // Sin máquina específica = precio general del proveedor (llave = servicio_id solo).
     const precios = {};
     (tarifas || []).filter(t => t.proveedor_id === p.id && t.servicio_id).forEach(t => {
-      const sid = t.servicio_id;
-      if (!precios[sid]) precios[sid] = { escalones: [], historial: [] };
-      precios[sid].historial.push({
+      const clave = claveEscalon(t.servicio_id, t.maquina_id);
+      if (!precios[clave]) precios[clave] = { escalones: [], historial: [] };
+      precios[clave].historial.push({
         id: t.id, precio: t.precio, fecha: t.created_at, qty: t.qty_referencia,
         tiraje_min: t.tiraje_min, tiraje_max: t.tiraje_max, activo: t.activo,
       });
       // activo === null cubre filas de antes de la migración (se tratan como vigentes)
       if (t.activo !== false) {
-        precios[sid].escalones.push({
+        precios[clave].escalones.push({
           id: t.id, tiraje_min: t.tiraje_min ?? "", tiraje_max: t.tiraje_max ?? "",
           precio: t.precio, tiempo_horas: t.tiempo_horas ?? "", notas: t.notas_precio || "",
         });
       }
     });
 
-    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, maquinas, precios };
+    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, mermaPersonalizada: p.merma_personalizada ?? "", maquinas, precios };
   });
 }
 
@@ -684,6 +767,11 @@ async function updateProveedorTipoDB(id, tipo) {
 
 async function updateProveedorCalificacionDB(id, calificacion) {
   const { error } = await supabase.from("proveedores").update({ calificacion }).eq("id", id);
+  if (error) console.error(error);
+}
+
+async function updateProveedorMermaDB(id, merma_personalizada) {
+  const { error } = await supabase.from("proveedores").update({ merma_personalizada }).eq("id", id);
   if (error) console.error(error);
 }
 
@@ -797,9 +885,9 @@ function parseCsvPrecios(text) {
 // ficha, sus escalones anteriores también se desactivan.
 async function savePreciosDB(provId, precios, previos) {
   const todasLasLlaves = new Set([...Object.keys(precios || {}), ...Object.keys(previos || {})]);
-  for (const servicio_id of todasLasLlaves) {
-    const nuevos = (precios?.[servicio_id]?.escalones || []).filter(e => e.precio !== "" && e.precio != null);
-    const anteriores = previos?.[servicio_id]?.escalones || [];
+  for (const clave of todasLasLlaves) {
+    const nuevos = (precios?.[clave]?.escalones || []).filter(e => e.precio !== "" && e.precio != null);
+    const anteriores = previos?.[clave]?.escalones || [];
     if (escalonesIguales(nuevos, anteriores)) continue;
 
     const idsAnteriores = anteriores.map(e => e.id).filter(Boolean);
@@ -809,8 +897,9 @@ async function savePreciosDB(provId, precios, previos) {
     }
 
     if (nuevos.length) {
+      const { servicioId, maquinaId } = parseClaveEscalon(clave);
       const rows = nuevos.map(e => ({
-        proveedor_id: provId, servicio_id,
+        proveedor_id: provId, servicio_id: servicioId, maquina_id: maquinaId,
         precio: parseFloat(e.precio),
         tiraje_min: e.tiraje_min === "" ? null : parseFloat(e.tiraje_min),
         tiraje_max: e.tiraje_max === "" ? null : parseFloat(e.tiraje_max),
@@ -1075,6 +1164,26 @@ function ArchivosProveedor({ provId }) {
 }
 
 
+// Input pequeño con guardado en blur, para no disparar recargas de toda la lista mientras escribes.
+function MermaProveedorInput({ provId, valorInicial }) {
+  const [valor, setValor] = useState(valorInicial ?? "");
+  const [guardado, setGuardado] = useState(false);
+  useEffect(() => { setValor(valorInicial ?? ""); }, [valorInicial]);
+
+  const guardar = async () => {
+    await updateProveedorMermaDB(provId, valor === "" ? null : parseFloat(valor));
+    setGuardado(true);
+    setTimeout(() => setGuardado(false), 1500);
+  };
+
+  return (
+    <input value={valor} onChange={e => setValor(e.target.value)} onBlur={guardar}
+      type="number" step="0.5" placeholder="usar tabla"
+      style={{ width: 70, padding: "3px 6px", fontSize: 11, borderRadius: 5,
+        border: `1.5px solid ${guardado ? C.green : C.border}`, background: C.bg, color: C.text }} />
+  );
+}
+
 function AdminProveedores() {
   const [proveedores, setProveedores] = useState([]);
   const [loading, setLoading]         = useState(true);
@@ -1192,6 +1301,11 @@ function AdminProveedores() {
                   {maqCount === 0 ? "Sin máquinas" : `${maqCount} máquina${maqCount > 1 ? "s" : ""}`}
                   {preciosConDatos > 0 && <span style={{ marginLeft: 8, color: C.green }}>· {preciosConDatos} proceso{preciosConDatos > 1 ? "s" : ""} con precio</span>}
                 </div>
+                <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                  <label style={{ fontSize: 11, color: C.muted }}>Merma personalizada de este proveedor:</label>
+                  <MermaProveedorInput provId={prov.id} valorInicial={prov.mermaPersonalizada} />
+                  <span style={{ fontSize: 11, color: C.muted }}>%</span>
+                </div>
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 <button onClick={() => toggleSection(prov.id, "maquinas")}
@@ -1308,6 +1422,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [sizeExt,   setSizeExt]   = useState(() => cotizacion?.tamano_extendido || "");
   const [qty, setQty] = useState(() => cotizacion?.cantidad || "1000");
   const [merma, setMerma] = useState("5");
+  const [mermaAuto, setMermaAuto] = useState(true); // true = se calcula sola con la tabla de merma; false = la editaste a mano
   const [gramaje, setGramaje] = useState(() => {
     if (cotizacion?.papel_acabado_gramaje) {
       // Extrae todos los números del texto (ej: "Sbs 12\nsbs 10 puntos" → ["12","10"])
@@ -1328,7 +1443,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const calcular = () => {
     const pw_ = parseFloat(pw), ph_ = parseFloat(ph), qty_ = parseInt(qty);
     const extW_ = parseFloat(extW) || null, extH_ = parseFloat(extH) || null;
-    const merma_ = parseFloat(merma) || 0, gramaje_ = parseFloat(gramaje) || 300, pkkg = parseFloat(pricePerKg) || 0;
+    const gramaje_ = parseFloat(gramaje) || 300, pkkg = parseFloat(pricePerKg) || 0;
     if (!pw_ || !ph_ || !qty_) return;
     const impW = extW_ || pw_, impH = extH_ || ph_;
 
@@ -1342,10 +1457,24 @@ function Calculadora({ onCalcDone, cotizacion }) {
       return b.result.piecesPerSheet - a.result.piecesPerSheet;
     });
 
+    // Auto-select the best compatible sheet (se necesita antes: la tabla de merma se
+    // consulta con PLIEGOS, no con piezas — "300001-en adelante" etc. es "hojas de impresión")
+    const autoSelect = raw.find(r => r.compatible !== false && r.result.piecesPerSheet > 0);
+    const pliegosNetosEst = autoSelect?.result.piecesPerSheet > 0 ? Math.ceil(qty_ / autoSelect.result.piecesPerSheet) : qty_;
+
+    let merma_ = parseFloat(merma) || 0;
+    if (mermaAuto) {
+      const tabla = mermaBaseImpresion(pliegosNetosEst);
+      if (tabla.tipo === "pct") {
+        merma_ = tabla.valor;
+      } else {
+        merma_ = pliegosNetosEst > 0 ? Math.round((tabla.valor / pliegosNetosEst) * 10000) / 100 : 0;
+      }
+      setMerma(String(merma_));
+    }
+
     const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, raw };
     setResults(res);
-    // Auto-select the best compatible sheet
-    const autoSelect = raw.find(r => r.compatible !== false && r.result.piecesPerSheet > 0);
     const autoLabel = autoSelect?.sheet.label ?? null;
     setSelectedSheetLabel(autoLabel);
     onCalcDone({ ...res, selectedSheet: autoSelect ? { ...autoSelect.sheet, ...autoSelect.result } : null });
@@ -1391,12 +1520,20 @@ function Calculadora({ onCalcDone, cotizacion }) {
               }}
               style={inputStyle} placeholder="Ej: 21.7×29.5 cm" />
           </div>
-          {[["Número de piezas", qty, setQty, "1"], ["Merma (%)", merma, setMerma, "0.5"]].map(([lbl, val, set, step]) => (
-            <div key={lbl}>
-              <label style={labelStyle}>{lbl}</label>
-              <input value={val} onChange={e => set(e.target.value)} style={inputStyle} type="number" step={step} />
+          <div>
+            <label style={labelStyle}>Número de piezas</label>
+            <input value={qty} onChange={e => setQty(e.target.value)} style={inputStyle} type="number" step="1" />
+          </div>
+          <div>
+            <label style={labelStyle}>Merma (%) {mermaAuto && <span style={{ color: C.green, fontWeight: 400 }}>· según tabla</span>}</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input value={merma} onChange={e => { setMerma(e.target.value); setMermaAuto(false); }} style={inputStyle} type="number" step="0.5" />
+              {!mermaAuto && (
+                <button onClick={() => setMermaAuto(true)} title="Volver a calcular con la tabla de merma"
+                  style={{ ...btn(C.bg, true), color: C.navy, border: `1.5px solid ${C.border}`, padding: "0 10px", whiteSpace: "nowrap" }}>↺ tabla</button>
+              )}
             </div>
-          ))}
+          </div>
           <div>
             <label style={labelStyle}>Gramaje / Puntos</label>
             <input value={gramaje} onChange={e => setGramaje(e.target.value)}
@@ -1490,7 +1627,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   const [qtyManual, setQtyManual] = useState("");
   const [pliegosManual, setPliegosManual] = useState("");
   const qty = parseInt(qtyManual) > 0 ? parseInt(qtyManual) : qtyDefault;
-  const pliegos = parseInt(pliegosManual) > 0 ? parseInt(pliegosManual) : pliegosCalc;
+  const pliegosBase = parseInt(pliegosManual) > 0 ? parseInt(pliegosManual) : pliegosCalc;
 
   // Selecciones de la cotización
   const [papelServicioId, setPapelServicioId] = useState("");
@@ -1504,9 +1641,15 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   const [barnizServicioId, setBarnizServicioId] = useState("");
   const [barnizProvId, setBarnizProvId] = useState("");
   const [acabados, setAcabados] = useState([]); // [{key, servicioId, provId, base}]
+  const [costosFijosSel, setCostosFijosSel] = useState({}); // { [servicioId]: provId }
   const [flete, setFlete] = useState("");
   const [extras, setExtras] = useState("");
   const [margen, setMargen] = useState("35");
+
+  // Merma extra por acabado: +50 pliegos por cada proceso de acabado que lleve el
+  // trabajo (barniz máquina, laminado, cualquier acabado manual), según tu tabla.
+  const extraMermaAcabados = (barnizServicioId ? 50 : 0) + acabados.filter(a => a.servicioId).length * 50;
+  const pliegos = pliegosBase + extraMermaAcabados;
 
   useEffect(() => {
     Promise.all([loadProveedoresDB(), loadServiciosCatalogo()]).then(([p, c]) => {
@@ -1516,31 +1659,54 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
 
   const servicioPorId = (id) => catalogo.find(s => s.id === id);
 
-  // Costo total que cobraría un proveedor por un servicio, para una cantidad real dada
-  // (ya elige el escalón correcto y aplica la unidad del servicio — millar, pieza, kg, fijo).
-  // Para impresión, el escalón guarda el precio POR COLOR (ej. GP: $600/millar por color);
-  // el costo real se multiplica por el número de colores del servicio (4/0 = 4, 4/4 = 8, etc.).
-  const costoDe = (provId, servicioId, cantidadReal, coloresOverride) => {
-    const p = proveedores.find(x => x.id === provId);
+  // "provId" en Cotizar en realidad puede ser un proveedor solo (precio general) o
+  // un proveedor + una de sus máquinas específicas, combinados en un solo id con
+  // el mismo truco que usamos para guardar precios: "proveedorId__m__maquinaId".
+  const combinarProvMaquina = (proveedorId, maquinaId) => claveEscalon(proveedorId, maquinaId);
+  const separarProvMaquina = (id) => { const r = parseClaveEscalon(id || ""); return { proveedorId: r.servicioId, maquinaId: r.maquinaId }; };
+
+  // Todas las opciones de precio de un proveedor para un servicio: la general
+  // (sin máquina específica) más una por cada máquina que tenga precio propio.
+  const opcionesPrecio = (prov, servicioId) =>
+    Object.keys(prov?.precios || {})
+      .filter(k => k === servicioId || k.startsWith(servicioId + "__m__"))
+      .map(k => ({ maquinaId: parseClaveEscalon(k).maquinaId, escalones: prov.precios[k].escalones || [] }))
+      .filter(op => op.escalones.length > 0);
+
+  // Costo + escalón para UNA combinación proveedor+máquina específica (ya no "la más barata de todas" —
+  // eso ahora lo decide el usuario eligiendo la fila que quiera en el comparador).
+  const costoYEscalonDe = (provIdCompuesto, servicioId, cantidadReal, coloresOverride, areaM2PorUnidad) => {
+    const { proveedorId, maquinaId } = separarProvMaquina(provIdCompuesto);
+    const p = proveedores.find(x => x.id === proveedorId);
     const s = servicioPorId(servicioId);
-    const escalones = p?.precios?.[servicioId]?.escalones || [];
+    const escalones = p?.precios?.[claveEscalon(servicioId, maquinaId)]?.escalones || [];
     if (!escalones.length) return null;
     const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(s?.unidad_precio, cantidadReal));
     if (!escalon) return null;
     const colores = coloresOverride != null ? coloresOverride : 1;
     const precioEfectivo = (parseFloat(escalon.precio) || 0) * colores;
-    return costoServicioPorCantidad(s?.unidad_precio, precioEfectivo, cantidadReal);
+    const costo = costoServicioPorCantidad(s?.unidad_precio, precioEfectivo, cantidadReal, areaM2PorUnidad);
+    return costo != null ? { costo, escalon } : null;
   };
 
-  // Tiempo (horas) capturado para el escalón que aplica, si el proveedor lo cargó.
-  // Devuelve null si no hay dato — así el cronograma sabe cuándo usar un valor por defecto.
-  const tiempoDe = (provId, servicioId, cantidadReal) => {
-    const p = proveedores.find(x => x.id === provId);
-    const s = servicioPorId(servicioId);
-    const escalones = p?.precios?.[servicioId]?.escalones || [];
-    if (!escalones.length) return null;
-    const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(s?.unidad_precio, cantidadReal));
-    const h = parseFloat(escalon?.tiempo_horas);
+  const costoDe = (provIdCompuesto, servicioId, cantidadReal, coloresOverride, areaM2PorUnidad) =>
+    costoYEscalonDe(provIdCompuesto, servicioId, cantidadReal, coloresOverride, areaM2PorUnidad)?.costo ?? null;
+
+  // Área (m²) de UN pliego o UNA pieza, para servicios que se cobran "por_m2" (ej. barniz, laminado).
+  const areaM2Para = (base) => {
+    if (base === "pliegos") {
+      const sh = calcData?.selectedSheet;
+      return sh?.w && sh?.h ? (parseFloat(sh.w) / 100) * (parseFloat(sh.h) / 100) : null;
+    }
+    const w = parseFloat(calcData?.extW) || parseFloat(calcData?.pw);
+    const h = parseFloat(calcData?.extH) || parseFloat(calcData?.ph);
+    return w && h ? (w / 100) * (h / 100) : null;
+  };
+
+  // Tiempo (horas) capturado para el escalón que aplica, si el proveedor lo cargó
+  // para esa combinación exacta de proveedor + máquina.
+  const tiempoDe = (provIdCompuesto, servicioId, cantidadReal) => {
+    const h = parseFloat(costoYEscalonDe(provIdCompuesto, servicioId, cantidadReal)?.escalon?.tiempo_horas);
     return h > 0 ? h : null;
   };
 
@@ -1560,20 +1726,34 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     return conflicto ? conflicto.nombre : null;
   };
 
-  const provsConPrecio = (servicioId, cantidadReal, rangoFechas) =>
-    proveedores
-      .map(p => ({
-        id: p.id, nombre: p.nombre, tipo: p.tipo, calificacion: p.calificacion || 0,
-        precio: costoDe(p.id, servicioId, cantidadReal),
-        tiempo: tiempoDe(p.id, servicioId, cantidadReal),
-        ocupado: rangoFechas ? proveedorOcupadoEn(p.id, rangoFechas) : null,
-      }))
-      .filter(p => p.precio != null && p.precio > 0)
+  const provsConPrecio = (servicioId, cantidadReal, rangoFechas, areaM2PorUnidad) =>
+    proveedores.flatMap(p =>
+      opcionesPrecio(p, servicioId).map(op => {
+        const idCompuesto = combinarProvMaquina(p.id, op.maquinaId);
+        const r = costoYEscalonDe(idCompuesto, servicioId, cantidadReal, undefined, areaM2PorUnidad);
+        if (!r) return null;
+        const maquina = op.maquinaId ? p.maquinas?.find(m => m.id === op.maquinaId) : null;
+        return {
+          id: idCompuesto, proveedorId: p.id, maquinaId: op.maquinaId,
+          nombre: p.nombre + (maquina ? " · " + (maquina.nombre || "máquina") : ""),
+          tipo: p.tipo, calificacion: p.calificacion || 0,
+          precio: r.costo,
+          tiempo: parseFloat(r.escalon?.tiempo_horas) > 0 ? parseFloat(r.escalon.tiempo_horas) : null,
+          ocupado: rangoFechas ? proveedorOcupadoEn(p.id, rangoFechas) : null,
+        };
+      })
+    ).filter(p => p != null && p.precio > 0)
       .sort((a, b) => a.precio - b.precio);
 
 
   const nombreServicio = (id) => catalogo.find(s => s.id === id)?.nombre || "—";
-  const nombreProv = (id) => proveedores.find(p => p.id === id)?.nombre || "—";
+  const nombreProv = (idCompuesto) => {
+    const { proveedorId, maquinaId } = separarProvMaquina(idCompuesto);
+    const p = proveedores.find(x => x.id === proveedorId);
+    if (!p) return "—";
+    const maquina = maquinaId ? p.maquinas?.find(m => m.id === maquinaId) : null;
+    return p.nombre + (maquina ? " · " + (maquina.nombre || "máquina") : "");
+  };
 
   const serviciosDe = (cats, patronNombre) => catalogo.filter(s =>
     cats.includes(s.categoria) && (!patronNombre || s.nombre.toLowerCase().includes(patronNombre.toLowerCase())));
@@ -1622,21 +1802,25 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   const costoAcabados = acabados.reduce((sum, a) => {
     if (!a.servicioId || !a.provId) return sum;
     const unidades = a.base === "pliegos" ? pliegos : qty;
-    return sum + (costoDe(a.provId, a.servicioId, unidades) || 0);
+    return sum + (costoDe(a.provId, a.servicioId, unidades, undefined, areaM2Para(a.base)) || 0);
   }, 0);
   const costoFlete = parseFloat(flete) || 0;
   const costoExtras = parseFloat(extras) || 0;
-  const costoTotal = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFlete + costoExtras;
+  const serviciosFijos = catalogo.filter(s => s.unidad_precio === "fijo");
+  const costoFijosSeleccionados = Object.entries(costosFijosSel).reduce((sum, [sid, pid]) => sum + (costoDe(pid, sid, 0) || 0), 0);
+  const costoTotal = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
 
   // ── Tiempo estimado de producción ──
-  // Usa la máquina del proveedor de Impresión que tenga velocidad cargada
-  // (si tiene varias, la primera con velocidad_hora capturada).
-  const maquinaDe = (provId) => {
-    const p = proveedores.find(x => x.id === provId);
+  // Si elegiste una máquina específica de Impresión, usa su velocidad; si el proveedor
+  // se eligió "general" (sin máquina), usa la primera máquina suya con velocidad cargada.
+  const maquinaDe = (provIdCompuesto) => {
+    const { proveedorId, maquinaId } = separarProvMaquina(provIdCompuesto);
+    const p = proveedores.find(x => x.id === proveedorId);
+    if (maquinaId) return (p?.maquinas || []).find(m => m.id === maquinaId) || null;
     return (p?.maquinas || []).find(m => parseFloat(m.velocidadHora) > 0) || null;
   };
   const maquinaImp = impProvId ? maquinaDe(impProvId) : null;
-  const horasEstimadas = maquinaImp && pliegos
+  const horasEstimadas = maquinaImp && pliegos && parseFloat(maquinaImp.velocidadHora) > 0
     ? pliegos / parseFloat(maquinaImp.velocidadHora) : null;
   const m = Math.min(Math.max(parseFloat(margen) || 0, 0), 90) / 100;
   const precioVenta = costoTotal > 0 ? costoTotal / (1 - m) : 0;
@@ -1713,7 +1897,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
       colorExtraServicioId ? ("Pantone — " + nombreServicio(colorExtraServicioId) + " (" + nombreProv(colorExtraProvId) + "): " + money(costoColorExtra)) : null,
       barnizServicioId ? ("Barniz máquina — " + nombreServicio(barnizServicioId) + " (" + nombreProv(barnizProvId) + "): " + money(costoBarniz)) : null,
       ...acabados.filter(a => a.servicioId && a.provId).map(a =>
-        "Acabado — " + nombreServicio(a.servicioId) + " (" + nombreProv(a.provId) + "): " + money(costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty) || 0)),
+        "Acabado — " + nombreServicio(a.servicioId) + " (" + nombreProv(a.provId) + "): " + money(costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty, undefined, areaM2Para(a.base)) || 0)),
+      ...Object.entries(costosFijosSel).map(([sid, pid]) =>
+        nombreServicio(sid) + " — (" + nombreProv(pid) + "): " + money(costoDe(pid, sid, 0) || 0)),
       costoFlete ? ("Flete: " + money(costoFlete)) : null,
       costoExtras ? ("Extras: " + money(costoExtras)) : null,
       "",
@@ -1880,8 +2066,13 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         {horasEstimadas != null && (
           <span> · ⏱ Tiempo estimado de impresión: <b>{formatoHoras(horasEstimadas)}</b> ({maquinaImp.nombre}, {parseFloat(maquinaImp.velocidadHora).toLocaleString("es-MX")} pliegos/hora)</span>
         )}
-        {impProvId && !maquinaImp && (
-          <span> · Sin velocidad cargada para este proveedor — agrégala en 🏭 Proveedores → Máquinas para ver tiempo estimado.</span>
+        {impProvId && horasEstimadas == null && (
+          <span> · Sin velocidad cargada para esta máquina/proveedor — agrégala en 🏭 Proveedores → Máquinas para ver tiempo estimado.</span>
+        )}
+        {impProvId && proveedores.find(p => p.id === separarProvMaquina(impProvId).proveedorId)?.mermaPersonalizada !== "" && proveedores.find(p => p.id === separarProvMaquina(impProvId).proveedorId)?.mermaPersonalizada != null && (
+          <div style={{ marginTop: 4 }}>
+            📐 Este proveedor usa su propia merma: <b>{proveedores.find(p => p.id === separarProvMaquina(impProvId).proveedorId).mermaPersonalizada}%</b> (definida en 🏭 Proveedores) — ajusta "Pliegos necesarios" arriba si quieres aplicarla en vez de la de la tabla.
+          </div>
         )}
       </div>
 
@@ -1916,15 +2107,16 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         </div>
         {acabados.map(a => {
           const unidadesA = a.base === "pliegos" ? pliegos : qty;
-          const provs = a.servicioId ? provsConPrecio(a.servicioId, unidadesA) : [];
-          const costoA = a.servicioId && a.provId ? (costoDe(a.provId, a.servicioId, unidadesA) || 0) : 0;
+          const areaA = areaM2Para(a.base);
+          const provs = a.servicioId ? provsConPrecio(a.servicioId, unidadesA, null, areaA) : [];
+          const costoA = a.servicioId && a.provId ? (costoDe(a.provId, a.servicioId, unidadesA, undefined, areaA) || 0) : 0;
           return (
             <div key={a.key} style={{ background: C.bg, border: "1.5px solid " + C.border, borderRadius: 8, padding: 10, marginBottom: 8 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
                 <select value={a.servicioId}
                   onChange={e => {
                     const sid = e.target.value;
-                    const ps = provsConPrecio(sid, unidadesA);
+                    const ps = provsConPrecio(sid, unidadesA, null, areaA);
                     updAcabado(a.key, { servicioId: sid, provId: ps.length ? ps[0].id : "" });
                   }}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
@@ -1962,6 +2154,60 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         </button>
       </div>
 
+      {serviciosFijos.length > 0 && (
+        <div style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 10 }}>Costos fijos del proyecto</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {serviciosFijos.map(s => {
+              const provsDisp = provsConPrecio(s.id, 0);
+              const seleccionado = costosFijosSel[s.id];
+              const marcado = seleccionado != null;
+              const costoLinea = marcado ? (costoDe(seleccionado, s.id, 0) || 0) : 0;
+              return (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, background: C.bg,
+                  border: `1.5px solid ${marcado ? C.cyan : C.border}`, borderRadius: 8, padding: "8px 12px" }}>
+                  <input type="checkbox" checked={marcado} style={{ accentColor: C.cyan, width: 16, height: 16 }}
+                    disabled={!marcado && provsDisp.length === 0}
+                    onChange={e => {
+                      setCostosFijosSel(prev => {
+                        const next = { ...prev };
+                        if (e.target.checked) {
+                          // Prioriza el mismo proveedor de Impresión si ya tiene precio de esto; si no, el más barato.
+                          const conImp = provsDisp.find(p => p.id === impProvId);
+                          next[s.id] = conImp ? conImp.id : provsDisp[0]?.id;
+                        } else {
+                          delete next[s.id];
+                        }
+                        return next;
+                      });
+                    }} />
+                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text }}>{s.nombre}</div>
+                  {marcado && provsDisp.length > 1 && (
+                    <select value={seleccionado} onChange={e => setCostosFijosSel(prev => ({ ...prev, [s.id]: e.target.value }))}
+                      style={{ ...inputStyle, width: 180, padding: "4px 8px", fontSize: 12 }}>
+                      {provsDisp.map(p => <option key={p.id} value={p.id}>{p.nombre} · {money(p.precio)}</option>)}
+                    </select>
+                  )}
+                  {marcado && provsDisp.length === 1 && (
+                    <div style={{ fontSize: 12, color: C.muted }}>{provsDisp[0].nombre}</div>
+                  )}
+                  {marcado && <div style={{ fontWeight: 700, color: C.navy, minWidth: 80, textAlign: "right" }}>{money(costoLinea)}</div>}
+                  {provsDisp.length === 0 && (
+                    <div style={{ fontSize: 11, color: C.coral }}>Sin precio cargado (🏭 Proveedores → Precios)</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {extraMermaAcabados > 0 && (
+        <div style={{ background: "#FFF9E8", border: `1.5px solid ${C.amber}`, borderRadius: 8, padding: "9px 12px", fontSize: 12, color: C.text, marginBottom: 12 }}>
+          📐 Merma extra por acabados: +{extraMermaAcabados} pliegos (50 por cada proceso: Barniz máquina, cada acabado agregado). Pliegos base {pliegosBase.toLocaleString("es-MX")} + {extraMermaAcabados} = <b>{pliegos.toLocaleString("es-MX")} pliegos</b> usados para cotizar Papel e Impresión.
+        </div>
+      )}
+
       {/* Flete, extras y margen */}
       <div style={{ ...cardStyle, marginBottom: 12 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px" }}>
@@ -1995,7 +2241,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
           barnizServicioId && { label: "Barniz máquina · " + nombreServicio(barnizServicioId), prov: nombreProv(barnizProvId), v: costoBarniz },
           ...acabados.filter(a => a.servicioId && a.provId).map(a => ({
             label: "Acabado · " + nombreServicio(a.servicioId), prov: nombreProv(a.provId),
-            v: costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty) || 0,
+            v: costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty, undefined, areaM2Para(a.base)) || 0,
+          })),
+          ...Object.entries(costosFijosSel).map(([sid, pid]) => ({
+            label: nombreServicio(sid), prov: nombreProv(pid), v: costoDe(pid, sid, 0) || 0,
           })),
           costoFlete > 0 && { label: "Flete", prov: "", v: costoFlete },
           costoExtras > 0 && { label: "Extras", prov: "", v: costoExtras },
@@ -2068,9 +2317,11 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
           <button onClick={() => {
             const id = cotizacion?.cot_id || trabajoIdRef.current;
             const proveedoresUsados = [];
-            const addProv = (pid) => {
-              if (!pid || proveedoresUsados.some(x => x.id === pid)) return;
-              const p = proveedores.find(x => x.id === pid);
+            const addProv = (pidCompuesto) => {
+              if (!pidCompuesto) return;
+              const { proveedorId } = separarProvMaquina(pidCompuesto);
+              if (proveedoresUsados.some(x => x.id === proveedorId)) return;
+              const p = proveedores.find(x => x.id === proveedorId);
               if (p) proveedoresUsados.push({ id: p.id, nombre: p.nombre });
             };
             addProv(papelProvId); addProv(impProvId); addProv(colorExtraProvId); addProv(barnizProvId);
