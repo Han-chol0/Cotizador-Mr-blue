@@ -774,9 +774,12 @@ async function loadProveedoresDB() {
   });
 }
 
-const TIPOS_PROVEEDOR = ["Impresores", "Papelería", "Acabados", "Fletes", "Otro"];
+const TIPOS_PROVEEDOR = ["Impresores", "Papel", "Acabados", "Suaje", "Laminado", "Barniz", "Hotstamping", "Hotmelt", "Cajas", "Serigrafía", "Maquila de sobre", "Tintas Especiales", "Fletes", "Otro"];
 const TIPO_PROVEEDOR_COLOR = {
-  "Impresores": C.navy, "Papelería": C.cyan, "Acabados": "#7C4DFF", "Fletes": C.coral, "Otro": C.muted,
+  "Impresores": C.navy, "Papel": C.cyan, "Acabados": "#7C4DFF", "Suaje": C.amber,
+  "Laminado": "#5B7BA8", "Barniz": "#A85B7B", "Hotstamping": "#B8860B", "Hotmelt": "#8B5E3C",
+  "Cajas": "#6B8E23", "Serigrafía": "#4682B4", "Maquila de sobre": "#708090", "Tintas Especiales": "#C71585",
+  "Fletes": C.coral, "Otro": C.muted,
 };
 
 async function addProveedorDB(nombre, tipo) {
@@ -2221,7 +2224,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         </div>
       )}
 
-      <SelectorCosto titulo="Pantone" cats={["impresion"]} patronNombre="pantone"
+      <SelectorCosto titulo="Tintas Especiales / Pantone" cats={["tintas_especiales"]}
         servicioId={colorExtraServicioId} provId={colorExtraProvId}
         setServ={setColorExtraServicioId} setProv={setColorExtraProvId}
         costo={costoColorExtra} unidadNota="(total)" cantidadReal={pliegos} />
@@ -2232,7 +2235,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         </div>
       )}
 
-      <SelectorCosto titulo="Barniz máquina" cats={["acabado"]} patronNombre="barniz"
+      <SelectorCosto titulo="Barniz máquina" cats={["barniz"]}
         servicioId={barnizServicioId} provId={barnizProvId}
         setServ={setBarnizServicioId} setProv={setBarnizProvId}
         costo={costoBarniz} unidadNota="(total)" cantidadReal={pliegos} />
@@ -2259,7 +2262,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
                   }}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
                   <option value="">— Servicio —</option>
-                  {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido"], unidadesA).map(s =>
+                  {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido", "laminado", "barniz", "hotstamping", "hotmelt", "cajas", "serigrafia", "maquila_sobre", "suaje"], unidadesA).map(s =>
                     <option key={s.id} value={s.id}>{etiquetaServicio(s, unidadesA)}</option>)}
                 </select>
                 <select value={a.provId} onChange={e => updAcabado(a.key, { provId: e.target.value })}
