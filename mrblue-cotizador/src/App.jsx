@@ -280,6 +280,19 @@ async function loadServiciosCatalogo() {
   return data || [];
 }
 
+// Crea un proceso nuevo directo en servicios_catalogo (desde el botón "+ Agregar
+// proceso" de la ficha de un proveedor). Así queda disponible de inmediato para
+// todos los proveedores y para la selección automática en 💵 Cotizar.
+async function crearServicioCatalogo({ nombre, categoria, unidad_precio }) {
+  const { data, error } = await supabase
+    .from("servicios_catalogo")
+    .insert({ nombre, categoria, unidad_precio, activo: true })
+    .select("id, nombre, categoria, unidad_precio")
+    .single();
+  if (error) { console.error(error); return null; }
+  return data;
+}
+
 // Paleta que se va asignando en orden a cada categoría que aparezca en el catálogo,
 // para que categorías nuevas (agregadas en Supabase) también tengan color sin tocar código.
 const PALETA_CATEGORIAS = [C.cyan, C.navy, "#7C4DFF", C.coral, C.green, C.amber, C.purple];
@@ -441,10 +454,20 @@ function FichaPrecios({ prov, onSave }) {
   const [catalogo, setCatalogo] = useState([]);
   const [loadingCat, setLoadingCat] = useState(true);
   const [precios, setPrecios] = useState({});
-  const [categoriaAbierta, setCategoriaAbierta] = useState("");
-  const [soloConPrecio, setSoloConPrecio] = useState(true);
   const [saved, setSaved] = useState(false);
   const [maquinaSelPorServicio, setMaquinaSelPorServicio] = useState({}); // { [servicioId]: maquinaId | null(=General) }
+
+  // ── Formulario "+ Agregar proceso" (nombre, categoría, unidad, precio, horas) ──
+  const [mostrandoForm, setMostrandoForm] = useState(false);
+  const [formNombre, setFormNombre] = useState("");
+  const [formCategoria, setFormCategoria] = useState("");
+  const [formCategoriaNueva, setFormCategoriaNueva] = useState("");
+  const [formUnidad, setFormUnidad] = useState("por_millar");
+  const [formPrecio, setFormPrecio] = useState("");
+  const [formHoras, setFormHoras] = useState("");
+  const [formNotas, setFormNotas] = useState("");
+  const [formError, setFormError] = useState("");
+  const [guardandoProceso, setGuardandoProceso] = useState(false);
 
   useEffect(() => {
     let vivo = true;
@@ -471,7 +494,7 @@ function FichaPrecios({ prov, onSave }) {
       });
       setPrecios(base);
       const categorias = [...new Set(cat.map(s => s.categoria))];
-      setCategoriaAbierta(categorias[0] || "");
+      setFormCategoria(categorias[0] || "__nueva__");
       setLoadingCat(false);
     });
     return () => { vivo = false; };
@@ -532,44 +555,49 @@ function FichaPrecios({ prov, onSave }) {
   const categorias = [...new Set(catalogo.map(s => s.categoria))];
   const tieneAlgunPrecio = (s) =>
     Object.keys(precios).some(k => (k === s.id || k.startsWith(s.id + "__m__")) && (precios[k].escalones || []).some(e => parseFloat(e.precio) > 0));
-  const categoriasConPrecio = categorias.filter(cat =>
-    catalogo.some(s => s.categoria === cat && tieneAlgunPrecio(s))
-  );
-  const categoriasVisibles = soloConPrecio ? categoriasConPrecio : categorias;
 
-  useEffect(() => {
-    if (categoriasVisibles.length > 0 && !categoriasVisibles.includes(categoriaAbierta)) {
-      setCategoriaAbierta(categoriasVisibles[0]);
+  // ── Agregar proceso manualmente: si el nombre ya existe en el catálogo lo
+  // reutiliza (evita duplicados); si no, lo crea en servicios_catalogo al vuelo
+  // para que también quede disponible en 💵 Cotizar.
+  const agregarProceso = async () => {
+    const nombre = formNombre.trim();
+    if (!nombre) { setFormError("Escribe el nombre del proceso."); return; }
+    const categoriaFinal = (formCategoria === "__nueva__" ? formCategoriaNueva : formCategoria).trim();
+    if (!categoriaFinal) { setFormError("Elige o escribe una categoría."); return; }
+
+    setFormError("");
+    setGuardandoProceso(true);
+
+    let servicio = catalogo.find(c => normalizarTexto(c.nombre) === normalizarTexto(nombre));
+    if (!servicio) {
+      servicio = await crearServicioCatalogo({ nombre, categoria: categoriaFinal, unidad_precio: formUnidad });
+      if (!servicio) {
+        setFormError("No se pudo crear el proceso. Intenta de nuevo.");
+        setGuardandoProceso(false);
+        return;
+      }
+      setCatalogo(prev => [...prev, servicio].sort((a, b) =>
+        a.categoria === b.categoria ? a.nombre.localeCompare(b.nombre) : a.categoria.localeCompare(b.categoria)));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [soloConPrecio, categoriasVisibles.join(",")]);
+
+    setPrecios(prev => {
+      const actuales = (prev[servicio.id]?.escalones || []).filter(e => e.precio !== "" && e.precio != null);
+      const nuevoEsc = { ...nuevoEscalon(), precio: formPrecio, tiempo_horas: formHoras, notas: formNotas };
+      return { ...prev, [servicio.id]: { escalones: [nuevoEsc, ...actuales], historial: prev[servicio.id]?.historial || [] } };
+    });
+
+    setFormNombre(""); setFormCategoriaNueva(""); setFormPrecio(""); setFormHoras(""); setFormNotas("");
+    setMostrandoForm(false);
+    setGuardandoProceso(false);
+  };
 
   if (loadingCat) return <div style={{ color: C.muted, padding: "10px 4px", fontSize: 12 }}>Cargando catálogo…</div>;
 
-  if (categorias.length === 0) {
-    return (
-      <div style={{ marginTop: 14, background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px", fontSize: 12, color: C.muted }}>
-        No hay servicios activos en el catálogo. Agrégalos en Supabase → tabla <code>servicios_catalogo</code>.
-      </div>
-    );
-  }
-
-  if (soloConPrecio && categoriasConPrecio.length === 0) {
-    return (
-      <div style={{ marginTop: 14 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, fontSize: 12, color: C.muted, cursor: "pointer", userSelect: "none" }}>
-          <input type="checkbox" checked={soloConPrecio} onChange={e => setSoloConPrecio(e.target.checked)} />
-          Mostrar solo lo que este proveedor ya maneja (tiene precio cargado)
-        </label>
-        <div style={{ background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px", fontSize: 12, color: C.muted }}>
-          Este proveedor todavía no tiene ningún precio cargado. Desmarca la casilla de arriba para ver el catálogo completo y capturar sus primeros precios.
-        </div>
-      </div>
-    );
-  }
-
   const unidadLabel = { por_millar: "$ / millar", por_pieza: "$ / pieza", unidad: "$ / unidad", por_kg: "$ / kg", por_m2: "$ / m²", fijo: "$ (costo único)" };
   const rangoUnidadLabel = { por_millar: "pliegos/piezas reales — ej. 1 a 1000, 1001 a 2000…", por_pieza: "piezas", unidad: "unidades", por_kg: "kg", por_m2: "pliegos o piezas (el precio ya se multiplica por su área en m²)" };
+
+  const procesosProveedor = catalogo.filter(s => tieneAlgunPrecio(s));
+  const hayImpresionVisible = procesosProveedor.some(s => s.categoria === "impresion");
 
   return (
     <div style={{ marginTop: 14 }}>
@@ -586,33 +614,89 @@ function FichaPrecios({ prov, onSave }) {
         )}
       </div>
 
-      {/* Tabs de categoría — solo las que este proveedor maneja, si el filtro está activo */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-        {categoriasVisibles.map(cat => (
-          <button key={cat} onClick={() => setCategoriaAbierta(cat)} style={{
-            background: categoriaAbierta === cat ? colorForCategoria(categorias, cat) : C.bg,
-            color: categoriaAbierta === cat ? "#fff" : C.muted,
-            border: `1.5px solid ${categoriaAbierta === cat ? colorForCategoria(categorias, cat) : C.border}`,
-            borderRadius: 20, padding: "4px 13px", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "capitalize",
-          }}>{cat}</button>
-        ))}
+      {/* Agregar proceso manualmente (nombre, tiempo y precio) */}
+      <div style={{ marginBottom: 14 }}>
+        {!mostrandoForm && (
+          <button onClick={() => setMostrandoForm(true)} style={btn(C.navy)}>+ Agregar proceso</button>
+        )}
+
+        {mostrandoForm && (
+          <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: 14, marginTop: 8 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 10 }}>Nuevo proceso</div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <div>
+                <label style={labelStyle}>Nombre del proceso</label>
+                <input value={formNombre} onChange={e => setFormNombre(e.target.value)}
+                  list="mrb-procesos-existentes" placeholder="Ej. Barniz UV mate" style={inputStyle} />
+                <datalist id="mrb-procesos-existentes">
+                  {catalogo.map(s => <option key={s.id} value={s.nombre} />)}
+                </datalist>
+              </div>
+              <div>
+                <label style={labelStyle}>Categoría</label>
+                <select value={formCategoria} onChange={e => setFormCategoria(e.target.value)} style={{ ...inputStyle, appearance: "none" }}>
+                  {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                  <option value="__nueva__">+ Nueva categoría…</option>
+                </select>
+                {formCategoria === "__nueva__" && (
+                  <input value={formCategoriaNueva} onChange={e => setFormCategoriaNueva(e.target.value)}
+                    placeholder="Nombre de la categoría" style={{ ...inputStyle, marginTop: 6 }} />
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <div>
+                <label style={labelStyle}>Unidad de precio</label>
+                <select value={formUnidad} onChange={e => setFormUnidad(e.target.value)} style={{ ...inputStyle, appearance: "none" }}>
+                  {Object.entries(unidadLabel).map(([val, label]) => <option key={val} value={val}>{label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>Precio</label>
+                <input value={formPrecio} onChange={e => setFormPrecio(e.target.value)}
+                  type="number" step="0.01" placeholder="0.00" style={inputStyle} />
+              </div>
+              <div>
+                <label style={labelStyle}>Horas (opcional)</label>
+                <input value={formHoras} onChange={e => setFormHoras(e.target.value)}
+                  type="number" step="0.5" placeholder="—" style={inputStyle} />
+              </div>
+            </div>
+
+            <input value={formNotas} onChange={e => setFormNotas(e.target.value)}
+              placeholder="Notas (incluye setup, planchas, condiciones especiales…)"
+              style={{ ...inputStyle, marginBottom: 10 }} />
+
+            {formError && <div style={{ color: C.red, fontSize: 11.5, marginBottom: 8 }}>{formError}</div>}
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={agregarProceso} disabled={guardandoProceso} style={btn(C.cyan)}>
+                {guardandoProceso ? "Agregando…" : "Agregar"}
+              </button>
+              <button onClick={() => { setMostrandoForm(false); setFormError(""); }}
+                style={{ ...btn(C.bg), color: C.muted, border: `1.5px solid ${C.border}` }}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, fontSize: 12, color: C.muted, cursor: "pointer", userSelect: "none" }}>
-        <input type="checkbox" checked={soloConPrecio} onChange={e => setSoloConPrecio(e.target.checked)} />
-        Mostrar solo lo que este proveedor ya maneja (tiene precio cargado)
-      </label>
-
-      {categoriaAbierta === "impresion" && (
+      {hayImpresionVisible && (
         <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 12px", fontSize: 11.5, color: C.text, marginBottom: 12 }}>
           💡 Captura el precio <b>por color</b> (ej. GP Impresores: $600/millar por color), no el total. El sistema multiplica automáticamente por el número de colores según el nombre del servicio ("4/0" = 4 colores, "4/4" = 8 colores).
         </div>
       )}
 
-      {catalogo
-        .filter(s => s.categoria === categoriaAbierta)
-        .filter(s => !soloConPrecio || tieneAlgunPrecio(s))
-        .map(s => {
+      {procesosProveedor.length === 0 && (
+        <div style={{ color: C.muted, fontSize: 12, padding: "10px 4px" }}>
+          Este proveedor todavía no tiene procesos con precio. Usa "+ Agregar proceso" para capturar el primero.
+        </div>
+      )}
+
+      {procesosProveedor.map(s => {
         const maquinaSel = maquinaSelPorServicio[s.id] ?? null; // null = "General"
         const claveActiva = claveEscalon(s.id, maquinaSel);
         const d = precios[claveActiva] || { escalones: [nuevoEscalon()], historial: [] };
@@ -622,6 +706,7 @@ function FichaPrecios({ prov, onSave }) {
           <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
             <div style={{ padding: "9px 12px 4px", fontWeight: 700, fontSize: 13, color: C.text }}>
               {s.nombre}
+              <span style={{ fontSize: 10, fontWeight: 700, color: C.muted, marginLeft: 8, textTransform: "capitalize" }}>{s.categoria}</span>
               {esFijo && <span style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginLeft: 6 }}>(costo único por proyecto)</span>}
             </div>
 
@@ -708,12 +793,6 @@ function FichaPrecios({ prov, onSave }) {
         );
       })}
 
-      {catalogo.filter(s => s.categoria === categoriaAbierta).filter(s => !soloConPrecio || tieneAlgunPrecio(s)).length === 0 && (
-        <div style={{ color: C.muted, fontSize: 12, padding: "10px 4px" }}>
-          {soloConPrecio ? "Ningún servicio de esta categoría tiene precio cargado todavía." : "Sin servicios en esta categoría."}
-        </div>
-      )}
-
       <button onClick={guardar} style={{ ...btn(saved ? C.green : C.cyan), marginTop: 8 }}>
         {saved ? "✓ Precios guardados" : "Guardar precios"}
       </button>
@@ -774,9 +853,9 @@ async function loadProveedoresDB() {
   });
 }
 
-const TIPOS_PROVEEDOR = ["Impresores", "Papel", "Acabados", "Suaje", "Laminado", "Barniz", "Hotstamping", "Hotmelt", "Cajas", "Serigrafía", "Maquila de sobre", "Tintas Especiales", "Fletes", "Otro"];
+const TIPOS_PROVEEDOR = ["Impresores", "Papel", "Acabados Manuales", "Suaje", "Laminado", "Barniz", "Hotstamping", "Hotmelt", "Cajas", "Serigrafía", "Maquila de sobre", "Tintas Especiales", "Fletes", "Otro"];
 const TIPO_PROVEEDOR_COLOR = {
-  "Impresores": C.navy, "Papel": C.cyan, "Acabados": "#7C4DFF", "Suaje": C.amber,
+  "Impresores": C.navy, "Papel": C.cyan, "Acabados Manuales": "#7C4DFF", "Suaje": C.amber,
   "Laminado": "#5B7BA8", "Barniz": "#A85B7B", "Hotstamping": "#B8860B", "Hotmelt": "#8B5E3C",
   "Cajas": "#6B8E23", "Serigrafía": "#4682B4", "Maquila de sobre": "#708090", "Tintas Especiales": "#C71585",
   "Fletes": C.coral, "Otro": C.muted,
@@ -1683,7 +1762,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
 
   // Merma extra por acabado: +50 pliegos por cada proceso de acabado que lleve el
   // trabajo (barniz máquina, laminado, cualquier acabado manual), según tu tabla.
-  const extraMermaAcabados = (barnizServicioId ? 50 : 0) + acabados.filter(a => a.servicioId).length * 50;
+  const extraMermaAcabados = (barnizServicioId ? 50 : 0) + acabados.filter(a => a.nombre).length * 50;
   const pliegos = pliegosBase + extraMermaAcabados;
 
   useEffect(() => {
@@ -1817,7 +1896,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   };
 
   const addAcabado = () =>
-    setAcabados(prev => [...prev, { key: Date.now() + Math.random(), servicioId: "", provId: "", base: "piezas" }]);
+    setAcabados(prev => [...prev, { key: Date.now() + Math.random(), servicioId: "", provId: "", base: "piezas", nombre: "", precio: "", horas: "" }]);
   const updAcabado = (key, patch) =>
     setAcabados(prev => prev.map(a => a.key === key ? { ...a, ...patch } : a));
   const delAcabado = (key) => setAcabados(prev => prev.filter(a => a.key !== key));
@@ -1836,14 +1915,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     ? (costoDe(colorExtraProvId, colorExtraServicioId, pliegos, cantidadPantones) || 0) : 0;
   const costoBarniz = barnizProvId && barnizServicioId && pliegos
     ? (costoDe(barnizProvId, barnizServicioId, pliegos) || 0) : 0;
-  const costoAcabados = acabados.reduce((sum, a) => {
-    if (!a.servicioId || !a.provId) return sum;
-    const unidades = a.base === "pliegos" ? pliegos : qty;
-    return sum + (costoDe(a.provId, a.servicioId, unidades, undefined, areaM2Para(a.base)) || 0);
-  }, 0);
+  const costoAcabados = acabados.reduce((sum, a) => sum + (parseFloat(a.precio) || 0), 0);
   const costoFlete = parseFloat(flete) || 0;
   const costoExtras = parseFloat(extras) || 0;
-  const serviciosFijos = catalogo.filter(s => s.unidad_precio === "fijo");
+  const serviciosFijos = catalogo.filter(s => s.unidad_precio === "fijo" && s.categoria !== "suaje");
   const costoFijosSeleccionados = Object.entries(costosFijosSel).reduce((sum, [sid, pid]) => sum + (costoDe(pid, sid, 0) || 0), 0);
   const costoTotal = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
 
@@ -1852,9 +1927,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     impServicioId && { label: "Impresión · " + nombreServicio(impServicioId), prov: nombreProv(impProvId), v: costoImp },
     colorExtraServicioId && { label: "Pantone · " + nombreServicio(colorExtraServicioId), prov: nombreProv(colorExtraProvId), v: costoColorExtra },
     barnizServicioId && { label: "Barniz máquina · " + nombreServicio(barnizServicioId), prov: nombreProv(barnizProvId), v: costoBarniz },
-    ...acabados.filter(a => a.servicioId && a.provId).map(a => ({
-      label: "Acabado · " + nombreServicio(a.servicioId), prov: nombreProv(a.provId),
-      v: costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty, undefined, areaM2Para(a.base)) || 0,
+    ...acabados.filter(a => a.nombre && parseFloat(a.precio) > 0).map(a => ({
+      label: "Acabado · " + a.nombre, prov: "", v: parseFloat(a.precio) || 0,
     })),
     ...Object.entries(costosFijosSel).map(([sid, pid]) => ({
       label: nombreServicio(sid), prov: nombreProv(pid), v: costoDe(pid, sid, 0) || 0,
@@ -1907,10 +1981,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     pasosCronograma.push({ key: "barniz", nombre: "Barniz máquina", horasDefault: tCap ?? 3, editable: tCap == null });
   }
   acabados.forEach(a => {
-    if (a.servicioId) {
-      const unidadesA = a.base === "pliegos" ? pliegos : qty;
-      const tCap = tiempoDe(a.provId, a.servicioId, unidadesA);
-      pasosCronograma.push({ key: "acabado_" + a.key, nombre: nombreServicio(a.servicioId), horasDefault: tCap ?? 24, editable: tCap == null });
+    if (a.nombre) {
+      const horasManual = parseFloat(a.horas);
+      pasosCronograma.push({ key: "acabado_" + a.key, nombre: a.nombre, horasDefault: horasManual > 0 ? horasManual : 24, editable: !(horasManual > 0) });
     }
   });
   if (pasosCronograma.length > 0) pasosCronograma.push({ key: "entrega", nombre: "Empaque y entrega", horasDefault: 4, editable: true });
@@ -1950,8 +2023,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
       impServicioId ? ("Impresión — " + nombreServicio(impServicioId) + " (" + nombreProv(impProvId) + "): " + money(costoImp)) : null,
       colorExtraServicioId ? ("Pantone — " + nombreServicio(colorExtraServicioId) + " (" + nombreProv(colorExtraProvId) + "): " + money(costoColorExtra)) : null,
       barnizServicioId ? ("Barniz máquina — " + nombreServicio(barnizServicioId) + " (" + nombreProv(barnizProvId) + "): " + money(costoBarniz)) : null,
-      ...acabados.filter(a => a.servicioId && a.provId).map(a =>
-        "Acabado — " + nombreServicio(a.servicioId) + " (" + nombreProv(a.provId) + "): " + money(costoDe(a.provId, a.servicioId, a.base === "pliegos" ? pliegos : qty, undefined, areaM2Para(a.base)) || 0)),
+      ...acabados.filter(a => a.nombre && parseFloat(a.precio) > 0).map(a =>
+        "Acabado — " + a.nombre + ": " + money(parseFloat(a.precio) || 0)),
       ...Object.entries(costosFijosSel).map(([sid, pid]) =>
         nombreServicio(sid) + " — (" + nombreProv(pid) + "): " + money(costoDe(pid, sid, 0) || 0)),
       costoFlete ? ("Flete: " + money(costoFlete)) : null,
@@ -2240,52 +2313,73 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         setServ={setBarnizServicioId} setProv={setBarnizProvId}
         costo={costoBarniz} unidadNota="(total)" cantidadReal={pliegos} />
 
-      {/* Acabados (múltiples) */}
+      {/* Acabados (múltiples): elige del catálogo (autocompleta precio) o captura libre */}
       <div style={{ ...cardStyle, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>Acabados</div>
           {costoAcabados > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costoAcabados)}</div>}
         </div>
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>Elige un producto del catálogo (autocompleta el precio de ese proveedor) o escribe uno libre — ambos campos siguen editables.</div>
         {acabados.map(a => {
           const unidadesA = a.base === "pliegos" ? pliegos : qty;
           const areaA = areaM2Para(a.base);
           const provs = a.servicioId ? provsConPrecio(a.servicioId, unidadesA, null, areaA) : [];
-          const costoA = a.servicioId && a.provId ? (costoDe(a.provId, a.servicioId, unidadesA, undefined, areaA) || 0) : 0;
           return (
             <div key={a.key} style={{ background: C.bg, border: "1.5px solid " + C.border, borderRadius: 8, padding: 10, marginBottom: 8 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 6 }}>
                 <select value={a.servicioId}
                   onChange={e => {
                     const sid = e.target.value;
-                    const ps = provsConPrecio(sid, unidadesA, null, areaA);
-                    updAcabado(a.key, { servicioId: sid, provId: ps.length ? ps[0].id : "" });
+                    const s = catalogo.find(c => c.id === sid);
+                    const ps = provsConPrecio(sid, unidadesA, null, areaM2Para(a.base));
+                    const mejor = ps.length ? ps[0] : null;
+                    updAcabado(a.key, {
+                      servicioId: sid, provId: mejor ? mejor.id : "",
+                      nombre: s ? s.nombre : a.nombre,
+                      precio: mejor ? String(mejor.precio) : a.precio,
+                    });
                   }}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
-                  <option value="">— Servicio —</option>
+                  <option value="">— Elegir del catálogo (opcional) —</option>
                   {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido", "laminado", "barniz", "hotstamping", "hotmelt", "cajas", "serigrafia", "maquila_sobre", "suaje"], unidadesA).map(s =>
                     <option key={s.id} value={s.id}>{etiquetaServicio(s, unidadesA)}</option>)}
                 </select>
-                <select value={a.provId} onChange={e => updAcabado(a.key, { provId: e.target.value })}
+                <select value={a.provId}
+                  onChange={e => {
+                    const pid = e.target.value;
+                    const p = provs.find(x => x.id === pid);
+                    updAcabado(a.key, { provId: pid, precio: p ? String(p.precio) : a.precio });
+                  }}
                   disabled={provs.length === 0}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12, opacity: provs.length === 0 ? 0.5 : 1 }}>
                   <option value="">— Proveedor —</option>
                   {provs.map((p, i) => <option key={p.id} value={p.id}>{p.nombre} · {money(p.precio)}{i === 0 ? " ⭐" : ""}</option>)}
                 </select>
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              {a.servicioId && (
                 <select value={a.base} onChange={e => updAcabado(a.key, { base: e.target.value })}
-                  style={{ ...inputStyle, appearance: "none", fontSize: 11, width: 190, padding: "5px 8px" }}>
+                  style={{ ...inputStyle, appearance: "none", fontSize: 11, width: 190, padding: "5px 8px", marginBottom: 6 }}>
                   <option value="piezas">Por millar de piezas</option>
                   <option value="pliegos">Por millar de pliegos</option>
                 </select>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  {costoA > 0 && <span style={{ fontWeight: 700, fontSize: 13, color: C.navy }}>{money(costoA)}</span>}
-                  <button onClick={() => delAcabado(a.key)}
-                    style={{ background: "none", border: "none", color: C.red, fontWeight: 700, cursor: "pointer", fontSize: 14 }}>✕</button>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 28px", gap: 8, alignItems: "center" }}>
+                <input value={a.nombre} onChange={e => updAcabado(a.key, { nombre: e.target.value })}
+                  placeholder="Nombre del proceso (ej. Barniz UV mate)" style={{ ...inputStyle, fontSize: 12.5 }} />
+                <div style={{ position: "relative" }}>
+                  <span style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
+                  <input value={a.precio} onChange={e => updAcabado(a.key, { precio: e.target.value })}
+                    type="number" step="0.01" placeholder="Precio"
+                    style={{ ...inputStyle, fontSize: 12, paddingLeft: 16, padding: "6px 8px 6px 16px" }} />
                 </div>
+                <input value={a.horas} onChange={e => updAcabado(a.key, { horas: e.target.value })}
+                  type="number" step="0.5" placeholder="Horas" title="Tiempo estimado (horas), para el cronograma"
+                  style={{ ...inputStyle, fontSize: 12, padding: "6px 8px" }} />
+                <button onClick={() => delAcabado(a.key)}
+                  style={{ background: "none", border: "none", color: C.red, fontWeight: 700, cursor: "pointer", fontSize: 14 }}>✕</button>
               </div>
               {a.servicioId && provs.length === 0 && (
-                <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>Sin proveedores con precio para este servicio.</div>
+                <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>Sin proveedores con precio para este producto — captura el precio a mano abajo.</div>
               )}
             </div>
           );
@@ -2497,7 +2591,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
               if (p) proveedoresUsados.push({ id: p.id, nombre: p.nombre });
             };
             addProv(papelProvId); addProv(impProvId); addProv(colorExtraProvId); addProv(barnizProvId);
-            acabados.forEach(a => addProv(a.provId));
+            // Los acabados ahora son manuales (sin proveedor propio) — no aportan al cronograma de proveedores.
             upsertCronogramaTrabajo({
               id,
               nombre: cotizacion?.nombre_proyecto || "Cotización sin nombre",
