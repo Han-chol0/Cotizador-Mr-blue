@@ -809,7 +809,7 @@ function FichaPrecios({ prov, onSave }) {
 
 async function loadProveedoresDB() {
   const { data: provs, error: e1 } = await supabase
-    .from("proveedores").select("id, nombre, tipo, calificacion, merma_personalizada").order("nombre");
+    .from("proveedores").select("id, nombre, tipo, calificacion, merma_personalizada, email, whatsapp, contacto_nombre").order("nombre");
   if (e1) { console.error(e1); return []; }
 
   const { data: maqs } = await supabase.from("maquinas").select("*");
@@ -849,7 +849,7 @@ async function loadProveedoresDB() {
       }
     });
 
-    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, mermaPersonalizada: p.merma_personalizada ?? "", maquinas, precios };
+    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, mermaPersonalizada: p.merma_personalizada ?? "", email: p.email || "", whatsapp: p.whatsapp || "", contactoNombre: p.contacto_nombre || "", maquinas, precios };
   });
 }
 
@@ -879,6 +879,11 @@ async function updateProveedorCalificacionDB(id, calificacion) {
 
 async function updateProveedorMermaDB(id, merma_personalizada) {
   const { error } = await supabase.from("proveedores").update({ merma_personalizada }).eq("id", id);
+  if (error) console.error(error);
+}
+
+async function updateProveedorContactoDB(id, campo, valor) {
+  const { error } = await supabase.from("proveedores").update({ [campo]: valor || null }).eq("id", id);
   if (error) console.error(error);
 }
 
@@ -1272,13 +1277,15 @@ function ArchivosProveedor({ provId }) {
 
 
 // Input pequeño con guardado en blur, para no disparar recargas de toda la lista mientras escribes.
-function MermaProveedorInput({ provId, valorInicial }) {
+function MermaProveedorInput({ provId, valorInicial, onSaved }) {
   const [valor, setValor] = useState(valorInicial ?? "");
   const [guardado, setGuardado] = useState(false);
   useEffect(() => { setValor(valorInicial ?? ""); }, [valorInicial]);
 
   const guardar = async () => {
-    await updateProveedorMermaDB(provId, valor === "" ? null : parseFloat(valor));
+    const num = valor === "" ? null : parseFloat(valor);
+    await updateProveedorMermaDB(provId, num);
+    onSaved?.(num);
     setGuardado(true);
     setTimeout(() => setGuardado(false), 1500);
   };
@@ -1288,6 +1295,29 @@ function MermaProveedorInput({ provId, valorInicial }) {
       type="number" step="0.5" placeholder="usar tabla"
       style={{ width: 70, padding: "3px 6px", fontSize: 11, borderRadius: 5,
         border: `1.5px solid ${guardado ? C.green : C.border}`, background: C.bg, color: C.text }} />
+  );
+}
+
+function ContactoProveedorInput({ provId, campo, valorInicial, placeholder, width, onSaved }) {
+  const [valor, setValor] = useState(valorInicial || "");
+  const [guardado, setGuardado] = useState(false);
+  useEffect(() => { setValor(valorInicial || ""); }, [valorInicial]);
+
+  const guardar = async () => {
+    const limpio = valor.trim();
+    await updateProveedorContactoDB(provId, campo, limpio);
+    onSaved?.(limpio);
+    setGuardado(true);
+    setTimeout(() => setGuardado(false), 1500);
+  };
+
+  return (
+    <input value={valor} onChange={e => setValor(e.target.value)} onBlur={guardar}
+      placeholder={placeholder}
+      style={width === "100%"
+        ? { ...inputStyle, border: `1.5px solid ${guardado ? C.green : C.border}` }
+        : { width: width || 160, padding: "3px 6px", fontSize: 11, borderRadius: 5,
+            border: `1.5px solid ${guardado ? C.green : C.border}`, background: C.bg, color: C.text }} />
   );
 }
 
@@ -1331,6 +1361,12 @@ function AdminProveedores() {
 
   const toggleSection = (provId, section) =>
     setExpanded(e => ({ ...e, [provId]: e[provId] === section ? false : section }));
+
+  // Actualiza un solo campo de un proveedor en memoria, sin volver a pedirle todo a
+  // Supabase — así los inputs de guardado-al-vuelo (merma, contacto) no se ven
+  // "borrados" al cerrar y reabrir su sección.
+  const actualizarProveedorLocal = (provId, patch) =>
+    setProveedores(prev => prev.map(p => p.id === provId ? { ...p, ...patch } : p));
 
   if (loading) return <div style={{ color: C.muted, textAlign: "center", padding: 24 }}>Cargando…</div>;
 
@@ -1410,11 +1446,17 @@ function AdminProveedores() {
                 </div>
                 <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
                   <label style={{ fontSize: 11, color: C.muted }}>Merma personalizada de este proveedor:</label>
-                  <MermaProveedorInput provId={prov.id} valorInicial={prov.mermaPersonalizada} />
+                  <MermaProveedorInput provId={prov.id} valorInicial={prov.mermaPersonalizada} onSaved={v => actualizarProveedorLocal(prov.id, { mermaPersonalizada: v ?? "" })} />
                   <span style={{ fontSize: 11, color: C.muted }}>%</span>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button onClick={() => toggleSection(prov.id, "contacto")}
+                  style={{ ...btn(expanded[prov.id] === "contacto" ? C.purple : C.bg),
+                    color: expanded[prov.id] === "contacto" ? "#fff" : C.muted,
+                    border: `1.5px solid ${expanded[prov.id] === "contacto" ? C.purple : C.border}` }}>
+                  📇 Contacto{(prov.email || prov.whatsapp || prov.contactoNombre) && <span style={{ marginLeft: 3 }}>✓</span>}
+                </button>
                 <button onClick={() => toggleSection(prov.id, "maquinas")}
                   style={{ ...btn(expanded[prov.id] === "maquinas" ? C.navy : C.bg),
                     color: expanded[prov.id] === "maquinas" ? "#fff" : C.muted,
@@ -1445,6 +1487,28 @@ function AdminProveedores() {
                 </button>
               </div>
             </div>
+
+            {/* Sección: Contacto */}
+            {expanded[prov.id] === "contacto" && (
+              <div style={{ marginTop: 14, background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: 14 }}>
+                <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 10 }}>Contacto de este proveedor</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
+                  <div>
+                    <label style={labelStyle}>Nombre de contacto (persona)</label>
+                    <ContactoProveedorInput provId={prov.id} campo="contacto_nombre" valorInicial={prov.contactoNombre} placeholder="Ej. Remedios Flores" width="100%" onSaved={v => actualizarProveedorLocal(prov.id, { contactoNombre: v })} />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>Correo</label>
+                    <ContactoProveedorInput provId={prov.id} campo="email" valorInicial={prov.email} placeholder="ventas@proveedor.com" width="100%" onSaved={v => actualizarProveedorLocal(prov.id, { email: v })} />
+                  </div>
+                  <div>
+                    <label style={labelStyle}>WhatsApp</label>
+                    <ContactoProveedorInput provId={prov.id} campo="whatsapp" valorInicial={prov.whatsapp} placeholder="5512345678" width="100%" onSaved={v => actualizarProveedorLocal(prov.id, { whatsapp: v })} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>Este nombre es el que se copia en ✉ Enviar solicitud al elegir este proveedor.</div>
+              </div>
+            )}
 
             {/* Sección: Máquinas */}
             {expanded[prov.id] === "maquinas" && (
@@ -1543,6 +1607,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
     return "300";
   });
   const [pricePerKg, setPricePerKg] = useState("0");
+  const [papelNombre, setPapelNombre] = useState(() => cotizacion?.papel_acabado_gramaje ? cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() : "");
   const [results, setResults] = useState(null);
   const [showIncompatible, setShowIncompatible] = useState(false);
   const [selectedSheetLabel, setSelectedSheetLabel] = useState(null);
@@ -1580,7 +1645,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
       setMerma(String(merma_));
     }
 
-    const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, raw };
+    const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, papelNombre, raw };
     setResults(res);
     const autoLabel = autoSelect?.sheet.label ?? null;
     setSelectedSheetLabel(autoLabel);
@@ -1646,9 +1711,14 @@ function Calculadora({ onCalcDone, cotizacion }) {
             <input value={gramaje} onChange={e => setGramaje(e.target.value)}
               style={inputStyle} type="number" step="1"
               placeholder={cotizacion?.papel_acabado_gramaje ? cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() : "300"} />
-            {cotizacion?.papel_acabado_gramaje && (
+          </div>
+          <div>
+            <label style={labelStyle}>Tipo de papel (para mandarle al papelero)</label>
+            <input value={papelNombre} onChange={e => setPapelNombre(e.target.value)}
+              style={inputStyle} placeholder="Ej: SBS 10 puntos, Bond 90g, Sulfatada 12 pts" />
+            {cotizacion?.papel_acabado_gramaje && papelNombre !== cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() && (
               <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
-                📄 {cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim().slice(0, 80)}
+                📄 De la solicitud: {cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim().slice(0, 80)}
               </div>
             )}
           </div>
@@ -1716,7 +1786,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
 // proveedor (Supabase) para armar el costo y el precio de venta. El margen se
 // aplica sobre venta (precio = costo / (1 - margen)), igual que la base de Excel.
 
-function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
+function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados }) {
   const [proveedores, setProveedores] = useState([]);
   const [catalogo, setCatalogo] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1757,6 +1827,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   const [acabados, setAcabados] = useState([]); // [{key, servicioId, provId, base}]
   const [costosFijosSel, setCostosFijosSel] = useState({}); // { [servicioId]: provId }
   const [flete, setFlete] = useState("");
+  const [cargoUrgenciaPct, setCargoUrgenciaPct] = useState("");
+  const [precioRealProveedor, setPrecioRealProveedor] = useState("");
   const [extras, setExtras] = useState("");
   const [margen, setMargen] = useState("35");
 
@@ -1793,13 +1865,16 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     const { proveedorId, maquinaId } = separarProvMaquina(provIdCompuesto);
     const p = proveedores.find(x => x.id === proveedorId);
     const s = servicioPorId(servicioId);
+    // Imanes/sustratos rígidos se cobran por pieza, no por pliego — aunque se elijan
+    // desde el selector de Papel (que normalmente calcula sobre pliegos).
+    const cantidadEfectiva = (s?.categoria === "magnetico" || s?.categoria === "sustrato_rigido") ? qty : cantidadReal;
     const escalones = p?.precios?.[claveEscalon(servicioId, maquinaId)]?.escalones || [];
     if (!escalones.length) return null;
-    const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(s?.unidad_precio, cantidadReal));
+    const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(s?.unidad_precio, cantidadEfectiva));
     if (!escalon) return null;
     const colores = coloresOverride != null ? coloresOverride : 1;
     const precioEfectivo = (parseFloat(escalon.precio) || 0) * colores;
-    const costo = costoServicioPorCantidad(s?.unidad_precio, precioEfectivo, cantidadReal, areaM2PorUnidad);
+    const costo = costoServicioPorCantidad(s?.unidad_precio, precioEfectivo, cantidadEfectiva, areaM2PorUnidad);
     return costo != null ? { costo, escalon } : null;
   };
 
@@ -1920,7 +1995,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
   const costoExtras = parseFloat(extras) || 0;
   const serviciosFijos = catalogo.filter(s => s.unidad_precio === "fijo" && s.categoria !== "suaje");
   const costoFijosSeleccionados = Object.entries(costosFijosSel).reduce((sum, [sid, pid]) => sum + (costoDe(pid, sid, 0) || 0), 0);
-  const costoTotal = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
+  const subtotalAntesDeUrgencia = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
+  const costoUrgencia = subtotalAntesDeUrgencia * ((parseFloat(cargoUrgenciaPct) || 0) / 100);
+  const costoTotal = subtotalAntesDeUrgencia + costoUrgencia;
 
   const desgloseArr = [
     papelServicioId && { label: "Papel · " + nombreServicio(papelServicioId), prov: nombreProv(papelProvId), v: costoPapel },
@@ -1935,6 +2012,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     })),
     costoFlete > 0 && { label: "Flete", prov: "", v: costoFlete },
     costoExtras > 0 && { label: "Extras", prov: "", v: costoExtras },
+    costoUrgencia > 0 && { label: "Cargo por urgencia (+" + cargoUrgenciaPct + "%)", prov: "", v: costoUrgencia },
   ].filter(Boolean);
 
 
@@ -2010,6 +2088,23 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [horasEstimadas, maquinaImp?.nombre, fechaEntregaEstimada?.getTime(), horasTotales]);
 
+  // Avisa hacia arriba (App → Enviar solicitud) qué proveedores reales quedaron
+  // elegidos en esta cotización, con su contacto, para poder mandarles el mensaje.
+  const idsProveedoresUsados = [papelProvId, impProvId, colorExtraProvId, barnizProvId,
+    ...acabados.map(a => a.provId), ...Object.values(costosFijosSel)]
+    .filter(Boolean).map(id => separarProvMaquina(id).proveedorId);
+  const idsUnicos = [...new Set(idsProveedoresUsados)].join(",");
+  useEffect(() => {
+    if (onProveedoresUsados) {
+      const lista = idsUnicos ? idsUnicos.split(",").map(id => {
+        const p = proveedores.find(x => x.id === id);
+        return p ? { id: p.id, nombre: p.nombre, tipo: p.tipo, contactoNombre: p.contactoNombre, email: p.email, whatsapp: p.whatsapp } : null;
+      }).filter(Boolean) : [];
+      onProveedoresUsados(lista);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idsUnicos]);
+
 
 
   const copiarDesglose = () => {
@@ -2029,6 +2124,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         nombreServicio(sid) + " — (" + nombreProv(pid) + "): " + money(costoDe(pid, sid, 0) || 0)),
       costoFlete ? ("Flete: " + money(costoFlete)) : null,
       costoExtras ? ("Extras: " + money(costoExtras)) : null,
+      costoUrgencia > 0 ? ("Cargo por urgencia (+" + cargoUrgenciaPct + "%): " + money(costoUrgencia)) : null,
       "",
       "COSTO TOTAL: " + money(costoTotal),
       "Margen: " + (m * 100).toFixed(0) + "% · Utilidad: " + money(utilidad),
@@ -2258,7 +2354,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         )}
       </div>
 
-      <SelectorCosto titulo="Papel" cats={["papel"]}
+      <SelectorCosto titulo="Papel" cats={["papel", "magnetico", "sustrato_rigido"]}
         servicioId={papelServicioId} provId={papelProvId}
         setServ={setPapelServicioId} setProv={setPapelProvId}
         costo={costoPapel} unidadNota="(total)" cantidadReal={pliegos} />
@@ -2341,7 +2437,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
                   }}
                   style={{ ...inputStyle, appearance: "none", fontSize: 12 }}>
                   <option value="">— Elegir del catálogo (opcional) —</option>
-                  {serviciosDisponibles(["acabado", "otro", "magnetico", "sustrato_rigido", "laminado", "barniz", "hotstamping", "hotmelt", "cajas", "serigrafia", "maquila_sobre", "suaje"], unidadesA).map(s =>
+                  {serviciosDisponibles(["acabado", "otro", "laminado", "barniz", "hotstamping", "hotmelt", "cajas", "serigrafia", "maquila_sobre", "suaje"], unidadesA).map(s =>
                     <option key={s.id} value={s.id}>{etiquetaServicio(s, unidadesA)}</option>)}
                 </select>
                 <select value={a.provId}
@@ -2445,7 +2541,12 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
 
       {/* Flete, extras y margen */}
       <div style={{ ...cardStyle, marginBottom: 12 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 14px" }}>
+        {cotizacion?.prioridad && cotizacion.prioridad !== "Normal" && (
+          <div style={{ background: "#FFF3E0", border: `1.5px solid ${C.amber}`, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: C.text, marginBottom: 12 }}>
+            ⚡ Esta cotización se marcó como <b>{cotizacion.prioridad}</b> en la solicitud — considera un cargo extra por urgencia si el proveedor te lo va a cobrar (pregúntale directo: si el precio ya incluye la urgencia o es aparte).
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "10px 14px" }}>
           <div>
             <label style={labelStyle}>Flete ($)</label>
             <input type="number" value={flete} onChange={e => setFlete(e.target.value)} placeholder="0.00" style={inputStyle} />
@@ -2455,12 +2556,16 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
             <input type="number" value={extras} onChange={e => setExtras(e.target.value)} placeholder="0.00" style={inputStyle} />
           </div>
           <div>
+            <label style={labelStyle}>Cargo por urgencia (%)</label>
+            <input type="number" value={cargoUrgenciaPct} onChange={e => setCargoUrgenciaPct(e.target.value)} placeholder="0" style={inputStyle} />
+          </div>
+          <div>
             <label style={labelStyle}>Margen (%)</label>
             <input type="number" value={margen} onChange={e => setMargen(e.target.value)} placeholder="35" style={inputStyle} />
           </div>
         </div>
         <div style={{ marginTop: 6, fontSize: 11, color: C.muted }}>
-          El margen se aplica sobre el precio de venta: precio = costo ÷ (1 − margen).
+          El margen se aplica sobre el precio de venta: precio = costo ÷ (1 − margen). El cargo por urgencia se aplica sobre el subtotal antes del margen.
         </div>
       </div>
 
@@ -2494,6 +2599,36 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
         )}
       </div>
 
+      <div style={{ ...cardStyle, marginBottom: 12 }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 4 }}>
+          📊 Comparar contra lo que el proveedor cotizó de verdad
+        </div>
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+          Cuando te responda por correo con su precio real, cáptalo aquí — así ves si tu tabla de precios sigue vigente o si el proveedor ya ajustó, y queda guardado en el historial para ver la tendencia con el tiempo.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px", alignItems: "end" }}>
+          <div>
+            <label style={labelStyle}>Precio real cotizado por el proveedor ($)</label>
+            <input type="number" value={precioRealProveedor} onChange={e => setPrecioRealProveedor(e.target.value)}
+              placeholder="Ej: 37,100" style={inputStyle} />
+          </div>
+          {parseFloat(precioRealProveedor) > 0 && costoTotal > 0 && (() => {
+            const real = parseFloat(precioRealProveedor);
+            const diff = real - costoTotal;
+            const pctDiff = (diff / costoTotal) * 100;
+            const subio = diff > 0;
+            return (
+              <div style={{ background: subio ? "#FFF3E0" : "#F0FFF4", border: `1.5px solid ${subio ? C.amber : C.green}`, borderRadius: 8, padding: "8px 12px" }}>
+                <div style={{ fontSize: 11, color: C.muted }}>Vs. tu costo calculado ({money(costoTotal)})</div>
+                <div style={{ fontWeight: 700, fontSize: 14, color: subio ? C.coral : C.green }}>
+                  {subio ? "▲" : "▼"} {money(Math.abs(diff))} ({subio ? "+" : ""}{pctDiff.toFixed(1)}%)
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </div>
+
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={copiarDesglose} disabled={costoTotal <= 0} style={{ ...btn(costoTotal > 0 ? C.coral : C.muted, true), flex: 1 }}>
           📋 Copiar desglose
@@ -2510,6 +2645,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
             qty, pliegos,
             desglose: desgloseArr.map(r => ({ label: r.label, prov: r.prov, monto: r.v })),
             costoTotal, margenPct: parseFloat(margen) || 0, precioVenta, utilidad,
+            precioRealProveedor: parseFloat(precioRealProveedor) || null,
           });
           setGuardadoPrecio(true);
           setTimeout(() => setGuardadoPrecio(false), 2000);
@@ -2616,6 +2752,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado }) {
               qty, pliegos,
               desglose: desgloseArr.map(r => ({ label: r.label, prov: r.prov, monto: r.v })),
               costoTotal, margenPct: parseFloat(margen) || 0, precioVenta, utilidad,
+              precioRealProveedor: parseFloat(precioRealProveedor) || null,
               proveedoresUsados,
             });
             setGuardadoCronograma(true);
@@ -2853,6 +2990,21 @@ function HistorialPreciosCotizaciones() {
                           </div>
                         ))}
                       </div>
+                      {h.precioRealProveedor > 0 && (() => {
+                        const diff = h.precioRealProveedor - h.costoTotal;
+                        const pct = (diff / h.costoTotal) * 100;
+                        return (
+                          <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${C.border}`, display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+                            <span style={{ color: C.muted }}>📊 Proveedor cotizó real:</span>
+                            <span>
+                              <b style={{ color: C.navy }}>{money(h.precioRealProveedor)}</b>
+                              <span style={{ color: diff > 0 ? C.coral : C.green, fontWeight: 700, marginLeft: 6 }}>
+                                ({diff > 0 ? "+" : ""}{pct.toFixed(1)}% vs. tu cálculo)
+                              </span>
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -3238,6 +3390,7 @@ Les solicito cotización de servicio de barniz UV para el siguiente trabajo:
 Producto: {producto}
 Medida final: {medida_final}
 Cantidad: {cantidad}
+Tamaño de pliego: {pliego}
 Pliegos a barnizar: {pliegos_totales}
 Fecha de solicitud: {fecha}
 
@@ -3252,6 +3405,7 @@ Solicito cotización de laminado para:
 Producto: {producto}
 Medida final: {medida_final}
 Cantidad: {cantidad}
+Tamaño de pliego: {pliego}
 Pliegos: {pliegos_totales}
 Fecha: {fecha}
 
@@ -3318,6 +3472,24 @@ Mr. Blue Laboratorios Creativos`,
 };
 
 // ── Resuelve variables en un template ────────────────────────────────────────
+// A qué plantilla de mensaje (TIPOS_SERVICIO) le toca a cada tipo de proveedor.
+const TIPO_PROVEEDOR_A_SERVICIO = {
+  "Impresores": "Impresión offset",
+  "Papel": "Papel / Sustrato",
+  "Barniz": "Barniz UV",
+  "Laminado": "Laminado",
+  "Suaje": "Troquel / Suaje",
+  "Hotstamping": "Foil / Relieve",
+  "Hotmelt": "Encuadernación",
+  "Cajas": "Otro",
+  "Serigrafía": "Otro",
+  "Maquila de sobre": "Otro",
+  "Tintas Especiales": "Impresión offset",
+  "Acabados Manuales": "Otro",
+  "Fletes": "Otro",
+  "Otro": "Otro",
+};
+
 function resolveTemplate(tpl, vars) {
   return tpl
     .replace(/{producto}/g,         vars.producto         || "—")
@@ -3458,11 +3630,11 @@ function AdminTemplates() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Envío de solicitud
 // ═══════════════════════════════════════════════════════════════════════════════
-function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado }) {
+function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotizacion }) {
   const [proveedorNombre, setProveedorNombre] = useState("");
   const [proveedorEmail, setProveedorEmail]   = useState("");
   const [proveedorTel, setProveedorTel]       = useState("");
-  const [producto, setProducto]               = useState(() => cotizacion?.nombre_proyecto || "");
+  const [producto, setProducto]               = useState(() => cotizacion?.nombre_proyecto ? "Cotización-" + cotizacion.nombre_proyecto : "");
   const [tipoServicio, setTipoServicio]       = useState(TIPOS_SERVICIO[0]);
   const [resendKey, setResendKey]             = useState(() => localStorage.getItem("mrblue_resend_key") || "");
   const [fromEmail, setFromEmail]             = useState(() => localStorage.getItem("mrblue_from_email") || "");
@@ -3472,6 +3644,15 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado }) {
   const [savedTemplates, setSavedTemplates]   = useState(DEFAULT_TEMPLATES);
   const [mensajeEditado, setMensajeEditado]   = useState("");
   const [editado, setEditado]                 = useState(false);
+  const [tipoServicioPorProveedor, setTipoServicioPorProveedor] = useState({}); // { [provId]: tipoServicioOverride }
+  const [marcadosEnviados, setMarcadosEnviados] = useState({}); // { [provId]: true }
+  const [mensajesEditados, setMensajesEditados] = useState({}); // { [provId]: textoEditado }
+  const [todosProveedores, setTodosProveedores] = useState([]);
+  const [proveedoresElegidos, setProveedoresElegidos] = useState({}); // { [provId]: true } — a quién sí le vas a pedir cotización
+
+  useEffect(() => {
+    loadProveedoresDB().then(setTodosProveedores);
+  }, []);
 
   useEffect(() => {
     storageGet("templates_servicio").then(d => { if (d) setSavedTemplates(d); });
@@ -3495,13 +3676,69 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado }) {
     cantidad:         calcData ? calcData.qty.toLocaleString("es-MX") + " piezas" : "—",
     pliego:           bestLabel,
     pliegos_totales:  bestTotal ? bestTotal.toLocaleString("es-MX") : "—",
-    gramaje:          calcData ? calcData.gramaje + " g/m2" : "—",
+    gramaje:          calcData?.papelNombre ? calcData.papelNombre : (calcData ? calcData.gramaje + " g/m2" : "—"),
     merma:            calcData ? calcData.merma + "%" : "—",
     fecha:            new Date().toLocaleDateString("es-MX"),
     tiempo_estimado:  tiempoEstimado?.fechaEntregaEstimada
       ? new Date(tiempoEstimado.fechaEntregaEstimada).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" })
       : (tiempoEstimado ? formatoHoras(tiempoEstimado.horas) + " (" + tiempoEstimado.maquinaNombre + ")" : "—"),
   });
+
+  // Mensaje ya adaptado al tipo de servicio de CADA proveedor (auto-detectado por su
+  // tipo, o el que hayas elegido a mano en su renglón), con las variables ya resueltas.
+  const mensajeParaProveedor = (p) => {
+    if (mensajesEditados[p.id] != null) return mensajesEditados[p.id];
+    const servicio = tipoServicioPorProveedor[p.id] || TIPO_PROVEEDOR_A_SERVICIO[p.tipo] || "Otro";
+    const tpl = savedTemplates[servicio] || DEFAULT_TEMPLATES[servicio] || "";
+    return resolveTemplate(tpl, buildVars());
+  };
+
+  // Une lo que elegiste con checkboxes aquí con lo que hayas elegido en 💵 Cotizar (si vienes de allá).
+  const idsElegidos = new Set([
+    ...Object.keys(proveedoresElegidos).filter(id => proveedoresElegidos[id]),
+    ...(proveedoresCotizacion || []).map(p => p.id),
+  ]);
+  const proveedoresParaEnviar = todosProveedores.filter(p => idsElegidos.has(p.id));
+  const [enviandoTodos, setEnviandoTodos] = useState(false);
+  const [resumenEnvioMasivo, setResumenEnvioMasivo] = useState(null);
+  const [resumenEnvioWhats, setResumenEnvioWhats] = useState(null);
+
+  const enviarCorreoATodos = async () => {
+    if (!resendKey || !fromEmail) { setShowConfig(true); return; }
+    setEnviandoTodos(true);
+    const conCorreo = proveedoresParaEnviar.filter(p => p.email);
+    let exitosos = 0, fallidos = 0;
+    for (const p of conCorreo) {
+      const msg = mensajeParaProveedor(p);
+      const asunto = "Solicitud de cotización — " + (producto || cotizacion?.nombre_proyecto || "proyecto") + " | Mr. Blue";
+      const r = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + resendKey },
+        body: JSON.stringify({ from: fromEmail, to: p.email, subject: asunto, text: msg }),
+      }).catch(() => null);
+      if (r?.ok) { exitosos++; setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); }
+      else fallidos++;
+    }
+    setResumenEnvioMasivo({ exitosos, fallidos, sinCorreo: proveedoresParaEnviar.length - conCorreo.length });
+    setEnviandoTodos(false);
+  };
+
+  // WhatsApp no tiene forma real de "enviar solo" sin la API de negocios de Meta (de paga).
+  // Esto abre una pestaña de WhatsApp Web por proveedor, ya con el mensaje escrito —
+  // solo falta darle "Enviar" en cada una. Se espacian un poco para que el navegador
+  // no las bloquee como si fueran spam de ventanas emergentes.
+  const abrirWhatsAppDeTodos = () => {
+    const conWa = proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "").length > 0);
+    conWa.forEach((p, i) => {
+      setTimeout(() => {
+        const num = p.whatsapp.replace(/\D/g, "");
+        const msg = mensajeParaProveedor(p);
+        window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, "_blank");
+        setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
+      }, i * 600);
+    });
+    setResumenEnvioWhats({ total: conWa.length, sinWhats: proveedoresParaEnviar.length - conWa.length });
+  };
 
   const tplBase = savedTemplates[tipoServicio] || DEFAULT_TEMPLATES[tipoServicio] || "";
   const mensajeVivo = resolveTemplate(tplBase, buildVars());
@@ -3592,41 +3829,139 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado }) {
 
         {/* Producto y template */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
-            <div>
-              <label style={labelStyle}>Nombre del producto</label>
-              <input value={producto} onChange={e => setProducto(e.target.value)}
-                placeholder="Ej: Caja plegadiza 4/0, Folleto 4/4…" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Proveedor</label>
-              <input value={proveedorNombre} onChange={e => setProveedorNombre(e.target.value)}
-                placeholder="Imprenta López" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Correo</label>
-              <input value={proveedorEmail} onChange={e => setProveedorEmail(e.target.value)}
-                placeholder="ventas@imprenta.mx" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>WhatsApp</label>
-              <input value={proveedorTel} onChange={e => setProveedorTel(e.target.value)}
-                placeholder="5512345678" style={inputStyle} />
-            </div>
-          </div>
+          {todosProveedores.length > 0 && (() => {
+            const gruposPorTipo = {};
+            todosProveedores.forEach(p => {
+              const t = p.tipo || "Otro";
+              if (!gruposPorTipo[t]) gruposPorTipo[t] = [];
+              gruposPorTipo[t].push(p);
+            });
 
-          <div>
-            <label style={labelStyle}>Tipo de servicio</label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {TIPOS_SERVICIO.map(t => (
-                <button key={t} onClick={() => setTipoServicio(t)} style={{
-                  background: tipoServicio === t ? C.navy : C.bg,
-                  color: tipoServicio === t ? "#fff" : C.muted,
-                  border: `1.5px solid ${tipoServicio === t ? C.navy : C.border}`,
-                  borderRadius: 20, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer",
-                }}>{t}</button>
-              ))}
+            return (
+              <>
+                <div style={{ background: C.card, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "12px" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: C.navy, marginBottom: 10 }}>
+                    🎯 ¿A quién le vas a pedir cotización de este trabajo?
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {Object.entries(gruposPorTipo).map(([tipo, provs]) => (
+                      <div key={tipo}>
+                        <div style={{ fontSize: 10.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>{tipo}</div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {provs.map(p => {
+                            const marcado = !!proveedoresElegidos[p.id] || (proveedoresCotizacion || []).some(x => x.id === p.id);
+                            return (
+                              <button key={p.id} onClick={() => setProveedoresElegidos(prev => ({ ...prev, [p.id]: !prev[p.id] }))}
+                                style={{ background: marcado ? C.cyan : C.bg, color: marcado ? "#fff" : C.navy,
+                                  border: `1.5px solid ${marcado ? C.cyan : C.border}`, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+                                {marcado ? "✓ " : ""}{p.nombre}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {proveedoresParaEnviar.length > 0 && (
+            <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "12px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: C.navy }}>
+                  📤 Enviar a {proveedoresParaEnviar.length} proveedor{proveedoresParaEnviar.length > 1 ? "es" : ""} — mensaje ya adaptado a cada servicio
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={enviarCorreoATodos} disabled={enviandoTodos || proveedoresParaEnviar.filter(p => p.email).length === 0}
+                    style={{ ...btn(C.coral, true), fontSize: 12, padding: "6px 14px", opacity: enviandoTodos ? 0.6 : 1 }}>
+                    {enviandoTodos ? "Enviando…" : `📧 Correo a todos (${proveedoresParaEnviar.filter(p => p.email).length})`}
+                  </button>
+                  <button onClick={abrirWhatsAppDeTodos} disabled={proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length === 0}
+                    style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px" }}>
+                    {`💬 WhatsApp a todos (${proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length})`}
+                  </button>
+                </div>
+              </div>
+              {resumenEnvioMasivo && (
+                <div style={{ fontSize: 11.5, color: C.text, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px", marginBottom: 8 }}>
+                  ✉ Correo — ✓ {resumenEnvioMasivo.exitosos} enviados
+                  {resumenEnvioMasivo.fallidos > 0 && <span style={{ color: C.coral }}> · ✗ {resumenEnvioMasivo.fallidos} fallaron</span>}
+                  {resumenEnvioMasivo.sinCorreo > 0 && <span style={{ color: C.muted }}> · {resumenEnvioMasivo.sinCorreo} sin correo</span>}
+                </div>
+              )}
+              {resumenEnvioWhats && (
+                <div style={{ fontSize: 11.5, color: C.text, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+                  💬 WhatsApp — se abrieron {resumenEnvioWhats.total} pestañas con el mensaje listo, dale "Enviar" en cada una
+                  {resumenEnvioWhats.sinWhats > 0 && <span style={{ color: C.muted }}> · {resumenEnvioWhats.sinWhats} sin WhatsApp</span>}
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {proveedoresParaEnviar.map(p => {
+                  const servicioActual = tipoServicioPorProveedor[p.id] || TIPO_PROVEEDOR_A_SERVICIO[p.tipo] || "Otro";
+                  const msg = mensajeParaProveedor(p);
+                  const enviado = !!marcadosEnviados[p.id];
+                  const asunto = "Solicitud de cotización — " + (producto || cotizacion?.nombre_proyecto || "proyecto");
+                  const waNum = (p.whatsapp || "").replace(/\D/g, "");
+                  return (
+                    <div key={p.id} style={{ background: C.card, border: `1.5px solid ${enviado ? C.green : C.border}`, borderRadius: 8, padding: "10px 12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: C.text }}>
+                            {p.nombre}{p.contactoNombre ? " · " + p.contactoNombre : ""}
+                            {enviado && <span style={{ marginLeft: 6, color: C.green, fontSize: 11 }}>✓ marcado como enviado</span>}
+                          </div>
+                          <div style={{ fontSize: 10.5, color: C.muted, marginTop: 1 }}>
+                            {p.email || "sin correo"} · {p.whatsapp || "sin WhatsApp"}
+                          </div>
+                        </div>
+                        <select value={servicioActual} onChange={e => setTipoServicioPorProveedor(prev => ({ ...prev, [p.id]: e.target.value }))}
+                          style={{ ...inputStyle, fontSize: 11, padding: "3px 7px", width: 160 }}>
+                          {TIPOS_SERVICIO.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </div>
+
+                      <details style={{ marginBottom: 8 }}>
+                        <summary style={{ fontSize: 11, color: C.cyan, cursor: "pointer", fontWeight: 700 }}>
+                          Ver / editar mensaje{mensajesEditados[p.id] != null && <span style={{ color: C.amber }}> · editado</span>}
+                        </summary>
+                        <textarea value={msg}
+                          onChange={e => setMensajesEditados(prev => ({ ...prev, [p.id]: e.target.value }))}
+                          rows={10}
+                          style={{ ...inputStyle, fontSize: 11.5, marginTop: 6, resize: "vertical", fontFamily: "inherit", lineHeight: 1.5 }} />
+                        {mensajesEditados[p.id] != null && (
+                          <button onClick={() => setMensajesEditados(prev => { const n = { ...prev }; delete n[p.id]; return n; })}
+                            style={{ background: "none", border: "none", color: C.cyan, fontSize: 11, fontWeight: 700, cursor: "pointer", padding: "4px 0 0" }}>
+                            ↺ Restaurar mensaje original
+                          </button>
+                        )}
+                      </details>
+
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button onClick={() => { navigator.clipboard.writeText(msg); setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); }}
+                          style={{ ...btn(C.navy, true), fontSize: 11, padding: "5px 10px" }}>📋 Copiar mensaje</button>
+                        <a href={p.email ? `mailto:${p.email}?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(msg)}` : undefined}
+                          onClick={() => p.email && setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }))}
+                          style={{ ...btn(p.email ? C.coral : C.muted, true), fontSize: 11, padding: "5px 10px", textDecoration: "none", opacity: p.email ? 1 : 0.5, pointerEvents: p.email ? "auto" : "none" }}>
+                          ✉ Abrir correo
+                        </a>
+                        <a href={waNum ? `https://wa.me/${waNum}?text=${encodeURIComponent(msg)}` : undefined} target="_blank" rel="noreferrer"
+                          onClick={() => waNum && setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }))}
+                          style={{ ...btn(waNum ? C.green : C.muted, true), fontSize: 11, padding: "5px 10px", textDecoration: "none", opacity: waNum ? 1 : 0.5, pointerEvents: waNum ? "auto" : "none" }}>
+                          💬 WhatsApp
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
+                )}
+              </>
+            );
+          })()}
+          <div>
+            <label style={labelStyle}>Nombre del producto (aparece en todos los mensajes)</label>
+            <input value={producto} onChange={e => setProducto(e.target.value)}
+              placeholder="Ej: Caja plegadiza 4/0, Folleto 4/4…" style={inputStyle} />
           </div>
         </div>
 
@@ -3647,41 +3982,8 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado }) {
           );
         })()}
 
-        {/* Divider */}
-        <div style={{ borderTop: `1px solid ${C.border}`, marginBottom: 14 }} />
-
-        {/* Mensaje */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
-          <div>
-            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>Mensaje</span>
-            {editado && <span style={{ marginLeft: 8, fontSize: 11, color: C.amber }}>· editado manualmente</span>}
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            {editado && (
-              <button onClick={() => { setMensajeEditado(mensajeVivo); setEditado(false); }}
-                style={{ ...btn(C.muted), background: "none", color: C.muted, border: `1px solid ${C.border}`, fontSize: 11 }}>
-                Restaurar
-              </button>
-            )}
-            <button onClick={() => navigator.clipboard.writeText(mensajeFinal)} style={btn(C.cyan)}>Copiar</button>
-          </div>
-        </div>
-        <textarea
-          value={mensajeFinal}
-          onChange={e => { setMensajeEditado(e.target.value); setEditado(true); }}
-          style={{ ...inputStyle, height: 200, resize: "vertical", fontSize: 13, lineHeight: 1.65 }}
-        />
-        <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
-          Editable antes de enviar. Cambia el tipo de servicio para cambiar el template.
-        </div>
       </div>
 
-      {proveedorNombre && (
-        <button onClick={enviarTodo} disabled={enviando}
-          style={{ ...btn(enviando ? C.muted : C.coral, true), marginBottom: 16 }}>
-          {enviando ? "Enviando…" : "✉ Enviar a " + proveedorNombre}
-        </button>
-      )}
 
       {resultados.length > 0 && (
         <div style={{ ...cardStyle, borderColor: C.green }}>
@@ -4277,6 +4579,7 @@ export default function App() {
   const [tab, setTab] = useState("cotizacion");
   const [calcData, setCalcData]     = useState(null);
   const [tiempoEstimado, setTiempoEstimado] = useState(null); // {horas, maquinaNombre} o null
+  const [proveedoresCotizacion, setProveedoresCotizacion] = useState([]); // [{id, nombre, email, whatsapp}]
   const [cotizacion, setCotizacion] = useState(() => {
     const saved = localStorage.getItem("mrblue_cot_activa");
     return saved ? JSON.parse(saved) : null;
@@ -4285,8 +4588,8 @@ export default function App() {
   const tabs = [
     { key: "cotizacion", label: "📋 Cotización"       },
     { key: "calc",       label: "📐 Pliegos"          },
-    { key: "cotizar",    label: "💵 Cotizar"          },
     { key: "envio",      label: "✉ Enviar solicitud"  },
+    { key: "cotizar",    label: "💵 Cotizar"          },
     { key: "seg",        label: "📋 Seguimiento"       },
     { key: "cronograma", label: "📅 Cronograma"        },
     { key: "histcot",    label: "📈 Historial cotizaciones" },
@@ -4346,19 +4649,25 @@ export default function App() {
           <>
             <Calculadora onCalcDone={setCalcData} cotizacion={cotizacion} />
             {calcData && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
-                <button onClick={() => setTab("cotizar")} style={{ ...btn(C.cyan, true), flex: 1, minWidth: 200 }}>
-                  Continuar → 💵 Cotizar con proveedores
-                </button>
-                <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), flex: 1, minWidth: 200 }}>
-                  Continuar → Enviar solicitud
+              <div style={{ marginTop: 4 }}>
+                <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), width: "100%" }}>
+                  Continuar → ✉ Enviar solicitud
                 </button>
               </div>
             )}
           </>
         )}
-        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} onTiempoEstimado={setTiempoEstimado} />}
-        {tab === "envio"     && <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} tiempoEstimado={tiempoEstimado} />}
+        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} onTiempoEstimado={setTiempoEstimado} onProveedoresUsados={setProveedoresCotizacion} />}
+        {tab === "envio" && (
+          <>
+            <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} tiempoEstimado={tiempoEstimado} proveedoresCotizacion={proveedoresCotizacion} />
+            <div style={{ marginTop: 4 }}>
+              <button onClick={() => setTab("cotizar")} style={{ ...btn(C.cyan, true), width: "100%" }}>
+                Continuar → 💵 Cotizar
+              </button>
+            </div>
+          </>
+        )}
         {tab === "seg"       && <Seguimiento />}
         {tab === "cronograma" && <CronogramaGeneral />}
         {tab === "histcot"    && <HistorialPreciosCotizaciones />}
