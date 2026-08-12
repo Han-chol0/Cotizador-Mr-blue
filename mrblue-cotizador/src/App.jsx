@@ -189,7 +189,7 @@ function Stat({ label, value, bold, accent }) {
 }
 
 // ─── Resultado por tamaño de pliego ──────────────────────────────────────────
-function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect }) {
+function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect, impresores }) {
   if (!compatible && !showIncompatible) return null;
 
   const totalRaw = result.piecesPerSheet > 0 ? Math.ceil(qty / result.piecesPerSheet) : null;
@@ -254,6 +254,28 @@ function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, co
           </div>
         </div>
       )}
+      {compatible && score > 0 && (() => {
+        const loManejan = (impresores || []).filter(p =>
+          (p.pliegosManeja || []).some(x => x.w === sheet.w && x.h === sheet.h));
+        if ((impresores || []).length === 0) return null;
+        return (
+          <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px dashed ${C.border}` }}>
+            {loManejan.length > 0 ? (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 10.5, color: C.muted }}>🟢 Ya manejan este pliego:</span>
+                {loManejan.map(p => (
+                  <span key={p.id} style={{ background: "#E8F5E9", color: "#2E7D32", border: "1px solid #A5D6A7",
+                    borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>{p.nombre}</span>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 10.5, color: C.muted }}>
+                🟡 Ninguno de tus impresores maneja este formato de rutina — tendrían que partir un pliego más grande (más tiempo y merma).
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {compatible && score > 0 && !isSelected && (
         <div style={{ marginTop: 8, fontSize: 11, color: C.muted, textAlign: "right" }}>Clic para seleccionar</div>
       )}
@@ -809,7 +831,7 @@ function FichaPrecios({ prov, onSave }) {
 
 async function loadProveedoresDB() {
   const { data: provs, error: e1 } = await supabase
-    .from("proveedores").select("id, nombre, tipo, calificacion, merma_personalizada, email, whatsapp, contacto_nombre").order("nombre");
+    .from("proveedores").select("id, nombre, tipo, calificacion, merma_personalizada, email, whatsapp, contacto_nombre, pliegos_maneja").order("nombre");
   if (e1) { console.error(e1); return []; }
 
   const { data: maqs } = await supabase.from("maquinas").select("*");
@@ -849,7 +871,7 @@ async function loadProveedoresDB() {
       }
     });
 
-    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, mermaPersonalizada: p.merma_personalizada ?? "", email: p.email || "", whatsapp: p.whatsapp || "", contactoNombre: p.contacto_nombre || "", maquinas, precios };
+    return { id: p.id, nombre: p.nombre, tipo: p.tipo || "Otro", calificacion: p.calificacion || 0, mermaPersonalizada: p.merma_personalizada ?? "", email: p.email || "", whatsapp: p.whatsapp || "", contactoNombre: p.contacto_nombre || "", pliegosManeja: Array.isArray(p.pliegos_maneja) ? p.pliegos_maneja : [], maquinas, precios };
   });
 }
 
@@ -884,6 +906,11 @@ async function updateProveedorMermaDB(id, merma_personalizada) {
 
 async function updateProveedorContactoDB(id, campo, valor) {
   const { error } = await supabase.from("proveedores").update({ [campo]: valor || null }).eq("id", id);
+  if (error) console.error(error);
+}
+
+async function updateProveedorPliegosDB(id, pliegos) {
+  const { error } = await supabase.from("proveedores").update({ pliegos_maneja: pliegos }).eq("id", id);
   if (error) console.error(error);
 }
 
@@ -1277,6 +1304,84 @@ function ArchivosProveedor({ provId }) {
 
 
 // Input pequeño con guardado en blur, para no disparar recargas de toda la lista mientras escribes.
+// Editor de los tamaños de pliego que un impresor maneja de rutina (los que ya compra
+// en formato). Se guarda a nivel de proveedor, no de máquina, porque en la práctica
+// todas sus prensas manejan más o menos los mismos formatos.
+function PliegosManejaEditor({ prov, onSaved }) {
+  const [lista, setLista] = useState(prov.pliegosManeja || []);
+  const [nuevoW, setNuevoW] = useState("");
+  const [nuevoH, setNuevoH] = useState("");
+  const [guardado, setGuardado] = useState(false);
+  useEffect(() => { setLista(prov.pliegosManeja || []); }, [prov.pliegosManeja]);
+
+  const persistir = async (nueva) => {
+    setLista(nueva);
+    await updateProveedorPliegosDB(prov.id, nueva);
+    onSaved?.(nueva);
+    setGuardado(true);
+    setTimeout(() => setGuardado(false), 1500);
+  };
+
+  const tieneEste = (w, h) => lista.some(p => p.w === w && p.h === h);
+  const toggleEstandar = (s) => {
+    persistir(tieneEste(s.w, s.h)
+      ? lista.filter(p => !(p.w === s.w && p.h === s.h))
+      : [...lista, { w: s.w, h: s.h, label: s.label }]);
+  };
+
+  const agregarPropio = () => {
+    const w = parseFloat(nuevoW), h = parseFloat(nuevoH);
+    if (!(w > 0 && h > 0) || tieneEste(w, h)) return;
+    persistir([...lista, { w, h, label: `${w}×${h} cm` }]);
+    setNuevoW(""); setNuevoH("");
+  };
+
+  const propios = lista.filter(p => !STANDARD_SHEETS.some(s => s.w === p.w && s.h === p.h));
+
+  return (
+    <div style={{ background: C.bg, border: `1.5px solid ${guardado ? C.green : C.border}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 12.5, color: C.navy, marginBottom: 3 }}>
+        📄 Pliegos que maneja de rutina{guardado && <span style={{ color: C.green, fontSize: 11, marginLeft: 6 }}>✓ guardado</span>}
+      </div>
+      <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 8 }}>
+        Los formatos que ya compra y corre normalmente. En 📐 Pliegos se marcan con 🟢 los proveedores que manejan el pliego elegido.
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+        {STANDARD_SHEETS.map(s => {
+          const activo = tieneEste(s.w, s.h);
+          return (
+            <button key={s.label} onClick={() => toggleEstandar(s)}
+              style={{ background: activo ? C.cyan : C.card, color: activo ? "#fff" : C.navy,
+                border: `1.5px solid ${activo ? C.cyan : C.border}`, borderRadius: 20, padding: "4px 12px",
+                fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+              {activo ? "✓ " : ""}{s.label}
+            </button>
+          );
+        })}
+        {propios.map(p => (
+          <button key={p.label} onClick={() => persistir(lista.filter(x => !(x.w === p.w && x.h === p.h)))}
+            style={{ background: C.cyan, color: "#fff", border: `1.5px solid ${C.cyan}`, borderRadius: 20,
+              padding: "4px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+            ✓ {p.label} ✕
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <span style={{ fontSize: 10.5, color: C.muted }}>Otro:</span>
+        <input value={nuevoW} onChange={e => setNuevoW(e.target.value)} type="number" step="0.1" placeholder="ancho"
+          style={{ ...inputStyle, width: 80, fontSize: 11, padding: "4px 8px" }} />
+        <span style={{ color: C.muted }}>×</span>
+        <input value={nuevoH} onChange={e => setNuevoH(e.target.value)} type="number" step="0.1" placeholder="alto"
+          style={{ ...inputStyle, width: 80, fontSize: 11, padding: "4px 8px" }} />
+        <span style={{ fontSize: 10.5, color: C.muted }}>cm</span>
+        <button onClick={agregarPropio} style={{ ...btn(C.card, true), color: C.navy, border: `1.5px dashed ${C.border}`, fontSize: 11, padding: "4px 10px" }}>
+          + Agregar
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function MermaProveedorInput({ provId, valorInicial, onSaved }) {
   const [valor, setValor] = useState(valorInicial ?? "");
   const [guardado, setGuardado] = useState(false);
@@ -1513,6 +1618,9 @@ function AdminProveedores() {
             {/* Sección: Máquinas */}
             {expanded[prov.id] === "maquinas" && (
               <div style={{ marginTop: 14 }}>
+                <PliegosManejaEditor prov={prov}
+                  onSaved={lista => actualizarProveedorLocal(prov.id, { pliegosManeja: lista })} />
+
                 <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
                   <button onClick={() => { setEditingMachine({ provId: prov.id, machine: emptyMachine() }); }}
                     style={btn(C.navy)}>+ Agregar máquina</button>
@@ -1608,6 +1716,13 @@ function Calculadora({ onCalcDone, cotizacion }) {
   });
   const [pricePerKg, setPricePerKg] = useState("0");
   const [papelNombre, setPapelNombre] = useState(() => cotizacion?.papel_acabado_gramaje ? cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() : "");
+  // Impresores con sus pliegos de rutina, para marcar en cada tarjeta quién lo maneja.
+  const [impresores, setImpresores] = useState([]);
+  useEffect(() => {
+    loadProveedoresDB().then(ps => setImpresores(
+      (ps || []).filter(p => p.tipo === "Impresores" && (p.pliegosManeja || []).length > 0)
+    ));
+  }, []);
   const [results, setResults] = useState(null);
   const [showIncompatible, setShowIncompatible] = useState(false);
   const [selectedSheetLabel, setSelectedSheetLabel] = useState(null);
@@ -1766,7 +1881,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
                 compatible={row.compatible} showIncompatible={showIncompatible}
                 isSelected={row.sheet.label === selectedSheetLabel}
                 isBest={row.sheet.label === autoB?.sheet.label}
-                onSelect={() => selectSheet(row)} />
+                onSelect={() => selectSheet(row)} impresores={impresores} />
             ))}
           </div>
 
@@ -3708,6 +3823,8 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [enviandoTodos, setEnviandoTodos] = useState(false);
   const [resumenEnvioMasivo, setResumenEnvioMasivo] = useState(null);
   const [resumenEnvioWhats, setResumenEnvioWhats] = useState(null);
+  const [colaWhatsApp, setColaWhatsApp] = useState([]);
+  const [indiceWhatsApp, setIndiceWhatsApp] = useState(-1); // -1 = no hay cola activa
 
   const enviarCorreoATodos = async () => {
     if (!resendKey || !fromEmail) { setShowConfig(true); return; }
@@ -3730,20 +3847,31 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   };
 
   // WhatsApp no tiene forma real de "enviar solo" sin la API de negocios de Meta (de paga).
-  // Esto abre una pestaña de WhatsApp Web por proveedor, ya con el mensaje escrito —
-  // solo falta darle "Enviar" en cada una. Se espacian un poco para que el navegador
-  // no las bloquee como si fueran spam de ventanas emergentes.
-  const abrirWhatsAppDeTodos = () => {
+  // En vez de abrir todas las pestañas de jalón (el navegador las bloqueaba como spam),
+  // se va uno por uno: arma la cola, abre solo la primera, y con "Siguiente" avanza.
+  const iniciarColaWhatsApp = () => {
     const conWa = proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "").length > 0);
-    conWa.forEach((p, i) => {
-      setTimeout(() => {
-        const num = p.whatsapp.replace(/\D/g, "");
-        const msg = mensajeParaProveedor(p);
-        window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, "_blank");
-        setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
-      }, i * 600);
-    });
+    setColaWhatsApp(conWa);
+    setIndiceWhatsApp(0);
     setResumenEnvioWhats({ total: conWa.length, sinWhats: proveedoresParaEnviar.length - conWa.length });
+  };
+
+  const abrirWhatsAppActual = () => {
+    const p = colaWhatsApp[indiceWhatsApp];
+    if (!p) return;
+    const num = p.whatsapp.replace(/\D/g, "");
+    const msg = mensajeParaProveedor(p);
+    window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, "_blank");
+    setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
+  };
+
+  const siguienteWhatsApp = () => {
+    if (indiceWhatsApp + 1 >= colaWhatsApp.length) {
+      setColaWhatsApp([]);
+      setIndiceWhatsApp(-1);
+    } else {
+      setIndiceWhatsApp(i => i + 1);
+    }
   };
 
   const tplBase = savedTemplates[tipoServicio] || DEFAULT_TEMPLATES[tipoServicio] || "";
@@ -3881,8 +4009,8 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                     style={{ ...btn(C.coral, true), fontSize: 12, padding: "6px 14px", opacity: enviandoTodos ? 0.6 : 1 }}>
                     {enviandoTodos ? "Enviando…" : `📧 Correo a todos (${proveedoresParaEnviar.filter(p => p.email).length})`}
                   </button>
-                  <button onClick={abrirWhatsAppDeTodos} disabled={proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length === 0}
-                    style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px" }}>
+                  <button onClick={iniciarColaWhatsApp} disabled={indiceWhatsApp >= 0 || proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length === 0}
+                    style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px", opacity: indiceWhatsApp >= 0 ? 0.6 : 1 }}>
                     {`💬 WhatsApp a todos (${proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length})`}
                   </button>
                 </div>
@@ -3894,9 +4022,28 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                   {resumenEnvioMasivo.sinCorreo > 0 && <span style={{ color: C.muted }}> · {resumenEnvioMasivo.sinCorreo} sin correo</span>}
                 </div>
               )}
-              {resumenEnvioWhats && (
+              {indiceWhatsApp >= 0 && colaWhatsApp[indiceWhatsApp] && (
+                <div style={{ background: "#F0FFF4", border: `1.5px solid ${C.green}`, borderRadius: 8, padding: "12px", marginBottom: 10 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: C.navy, marginBottom: 8 }}>
+                    💬 Proveedor {indiceWhatsApp + 1} de {colaWhatsApp.length}: {colaWhatsApp[indiceWhatsApp].nombre}
+                    {colaWhatsApp[indiceWhatsApp].contactoNombre ? " · " + colaWhatsApp[indiceWhatsApp].contactoNombre : ""}
+                  </div>
+                  <div style={{ whiteSpace: "pre-wrap", fontSize: 11.5, color: C.text, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 8, maxHeight: 140, overflowY: "auto" }}>
+                    {mensajeParaProveedor(colaWhatsApp[indiceWhatsApp])}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={abrirWhatsAppActual} style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px", flex: 1 }}>
+                      💬 Abrir WhatsApp de {colaWhatsApp[indiceWhatsApp].nombre}
+                    </button>
+                    <button onClick={siguienteWhatsApp} style={{ ...btn(C.navy, true), fontSize: 12, padding: "6px 14px" }}>
+                      {indiceWhatsApp + 1 >= colaWhatsApp.length ? "Terminar ✓" : "Siguiente →"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {indiceWhatsApp === -1 && resumenEnvioWhats && (
                 <div style={{ fontSize: 11.5, color: C.text, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
-                  💬 WhatsApp — se abrieron {resumenEnvioWhats.total} pestañas con el mensaje listo, dale "Enviar" en cada una
+                  💬 WhatsApp — terminaste la ronda de {resumenEnvioWhats.total} proveedores
                   {resumenEnvioWhats.sinWhats > 0 && <span style={{ color: C.muted }}> · {resumenEnvioWhats.sinWhats} sin WhatsApp</span>}
                 </div>
               )}
