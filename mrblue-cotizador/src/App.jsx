@@ -3830,19 +3830,27 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     if (!resendKey || !fromEmail) { setShowConfig(true); return; }
     setEnviandoTodos(true);
     const conCorreo = proveedoresParaEnviar.filter(p => p.email);
-    let exitosos = 0, fallidos = 0;
+    let exitosos = 0, fallidos = 0, primerError = null;
     for (const p of conCorreo) {
       const msg = mensajeParaProveedor(p);
       const asunto = "Solicitud de cotización — " + (producto || cotizacion?.nombre_proyecto || "proyecto") + " | Mr. Blue";
-      const r = await fetch("https://api.resend.com/emails", {
+      const r = await fetch("/api/send-email", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + resendKey },
-        body: JSON.stringify({ from: fromEmail, to: p.email, subject: asunto, text: msg }),
-      }).catch(() => null);
-      if (r?.ok) { exitosos++; setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); }
-      else fallidos++;
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: p.email, subject: asunto, text: msg }),
+      }).catch(err => ({ ok: false, _networkError: err.message }));
+      if (r?.ok) {
+        exitosos++;
+        setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
+      } else {
+        fallidos++;
+        if (!primerError) {
+          const cuerpo = r?._networkError || await r?.json?.().then(d => d?.error).catch(() => null);
+          primerError = cuerpo || "Error desconocido";
+        }
+      }
     }
-    setResumenEnvioMasivo({ exitosos, fallidos, sinCorreo: proveedoresParaEnviar.length - conCorreo.length });
+    setResumenEnvioMasivo({ exitosos, fallidos, sinCorreo: proveedoresParaEnviar.length - conCorreo.length, primerError });
     setEnviandoTodos(false);
   };
 
@@ -3891,10 +3899,10 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     setEnviando(true);
     const entry = { proveedor: proveedorNombre, canales: [], waLink: null };
     if (proveedorEmail && resendKey && fromEmail) {
-      const r = await fetch("https://api.resend.com/emails", {
+      const r = await fetch("/api/send-email", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + resendKey },
-        body: JSON.stringify({ from: fromEmail, to: proveedorEmail, subject: "Solicitud de cotización – " + (producto || "Producto offset") + " | Mr. Blue", text: mensajeFinal }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: proveedorEmail, subject: "Solicitud de cotización – " + (producto || "Producto offset") + " | Mr. Blue", text: mensajeFinal }),
       }).catch(() => null);
       entry.canales.push(r?.ok ? "✓ Correo enviado" : "✗ Error al enviar correo");
     } else if (proveedorEmail) {
@@ -4017,9 +4025,14 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
               </div>
               {resumenEnvioMasivo && (
                 <div style={{ fontSize: 11.5, color: C.text, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px", marginBottom: 8 }}>
-                  ✉ Correo — ✓ {resumenEnvioMasivo.exitosos} enviados
-                  {resumenEnvioMasivo.fallidos > 0 && <span style={{ color: C.coral }}> · ✗ {resumenEnvioMasivo.fallidos} fallaron</span>}
-                  {resumenEnvioMasivo.sinCorreo > 0 && <span style={{ color: C.muted }}> · {resumenEnvioMasivo.sinCorreo} sin correo</span>}
+                  <div>
+                    ✉ Correo — ✓ {resumenEnvioMasivo.exitosos} enviados
+                    {resumenEnvioMasivo.fallidos > 0 && <span style={{ color: C.coral }}> · ✗ {resumenEnvioMasivo.fallidos} fallaron</span>}
+                    {resumenEnvioMasivo.sinCorreo > 0 && <span style={{ color: C.muted }}> · {resumenEnvioMasivo.sinCorreo} sin correo</span>}
+                  </div>
+                  {resumenEnvioMasivo.primerError && (
+                    <div style={{ color: C.coral, marginTop: 3 }}>Detalle: {resumenEnvioMasivo.primerError}</div>
+                  )}
                 </div>
               )}
               {indiceWhatsApp >= 0 && colaWhatsApp[indiceWhatsApp] && (
