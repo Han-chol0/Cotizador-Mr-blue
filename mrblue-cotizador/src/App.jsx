@@ -3339,6 +3339,8 @@ const TIPOS_SERVICIO = [
 ];
 
 const VARIABLES = [
+  { key: "{saludo}",           label: "Saludo con nombre",   ejemplo: "Buen día Remedios," },
+  { key: "{contacto}",         label: "Nombre de contacto",  ejemplo: "Remedios Flores" },
   { key: "{producto}",         label: "Producto",           ejemplo: "Caja plegadiza 4/0" },
   { key: "{medida_final}",     label: "Medida final",        ejemplo: "10×7 cm" },
   { key: "{medida_extendida}", label: "Medida extendida",    ejemplo: "12×9 cm" },
@@ -3351,7 +3353,7 @@ const VARIABLES = [
 ];
 
 const DEFAULT_TEMPLATES = {
-  "Impresión offset": `Buen día,
+  "Impresión offset": `{saludo}
 
 Les escribo para solicitar cotización de impresión offset con las siguientes especificaciones:
 
@@ -3368,7 +3370,7 @@ Favor de cotizar incluyendo: precio por millar o pieza, tiempo de entrega y si e
 Quedo en espera de su cotización.
 Mr. Blue Laboratorios Creativos`,
 
-  "Papel / Sustrato": `Buen día,
+  "Papel / Sustrato": `{saludo}
 
 Solicito cotización de papel/sustrato para producción offset:
 
@@ -3383,7 +3385,7 @@ Favor de indicar precio por kg o por millar de pliegos, disponibilidad inmediata
 Gracias,
 Mr. Blue Laboratorios Creativos`,
 
-  "Barniz UV": `Buen día,
+  "Barniz UV": `{saludo}
 
 Les solicito cotización de servicio de barniz UV para el siguiente trabajo:
 
@@ -3398,7 +3400,7 @@ Requiero cotización de barniz UV total y selectivo por separado, con tiempo de 
 
 Mr. Blue Laboratorios Creativos`,
 
-  "Laminado": `Buen día,
+  "Laminado": `{saludo}
 
 Solicito cotización de laminado para:
 
@@ -3413,7 +3415,7 @@ Favor cotizar laminado mate y brillante por separado, indicando precio por milla
 
 Mr. Blue Laboratorios Creativos`,
 
-  "Troquel / Suaje": `Buen día,
+  "Troquel / Suaje": `{saludo}
 
 Necesito cotización de troquel/suaje para:
 
@@ -3426,7 +3428,7 @@ Fecha de solicitud: {fecha}
 
 Mr. Blue Laboratorios Creativos`,
 
-  "Encuadernación": `Buen día,
+  "Encuadernación": `{saludo}
 
 Solicito cotización de encuadernación para:
 
@@ -3439,7 +3441,7 @@ Favor de cotizar engrapado y pegado perfecto por separado, con tiempo de entrega
 
 Mr. Blue Laboratorios Creativos`,
 
-  "Foil / Relieve": `Buen día,
+  "Foil / Relieve": `{saludo}
 
 Requiero cotización de foil metálico / relieve (embossing) para:
 
@@ -3453,7 +3455,7 @@ Favor indicar colores de foil disponibles y si cuentan con el cliché o se fabri
 
 Mr. Blue Laboratorios Creativos`,
 
-  "Otro": `Buen día,
+  "Otro": `{saludo}
 
 Solicito cotización para el siguiente trabajo:
 
@@ -3500,7 +3502,9 @@ function resolveTemplate(tpl, vars) {
     .replace(/{pliegos_totales}/g,   vars.pliegos_totales   || "—")
     .replace(/{gramaje}/g,           vars.gramaje           || "—")
     .replace(/{merma}/g,             vars.merma             || "—")
-    .replace(/{fecha}/g,             vars.fecha             || "—");
+    .replace(/{fecha}/g,             vars.fecha             || "—")
+    .replace(/{saludo}/g,            vars.saludo            || "Buen día,")
+    .replace(/{contacto}/g,          vars.contacto          || "");
 }
 
 // ── Módulo: Editor de templates ──────────────────────────────────────────────
@@ -3669,7 +3673,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const bestTotal = piezasPorPliego > 0 && calcData
     ? Math.ceil(Math.ceil(calcData.qty / piezasPorPliego) * (1 + calcData.merma / 100)) : null;
 
-  const buildVars = () => ({
+  const buildVars = (p) => ({
     producto:         producto || "—",
     medida_final:     calcData ? calcData.pw + "x" + calcData.ph + " cm" : "—",
     medida_extendida: calcData && calcData.extW ? calcData.extW + "x" + calcData.extH + " cm" : "—",
@@ -3682,6 +3686,8 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     tiempo_estimado:  tiempoEstimado?.fechaEntregaEstimada
       ? new Date(tiempoEstimado.fechaEntregaEstimada).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" })
       : (tiempoEstimado ? formatoHoras(tiempoEstimado.horas) + " (" + tiempoEstimado.maquinaNombre + ")" : "—"),
+    contacto:         p?.contactoNombre || "",
+    saludo:           p?.contactoNombre ? "Buen día " + p.contactoNombre + "," : "Buen día,",
   });
 
   // Mensaje ya adaptado al tipo de servicio de CADA proveedor (auto-detectado por su
@@ -3690,7 +3696,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     if (mensajesEditados[p.id] != null) return mensajesEditados[p.id];
     const servicio = tipoServicioPorProveedor[p.id] || TIPO_PROVEEDOR_A_SERVICIO[p.tipo] || "Otro";
     const tpl = savedTemplates[servicio] || DEFAULT_TEMPLATES[servicio] || "";
-    return resolveTemplate(tpl, buildVars());
+    return resolveTemplate(tpl, buildVars(p));
   };
 
   // Une lo que elegiste con checkboxes aquí con lo que hayas elegido en 💵 Cotizar (si vienes de allá).
