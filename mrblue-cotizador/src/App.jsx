@@ -3749,6 +3749,48 @@ function AdminTemplates() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Envío de solicitud
 // ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// MÓDULO: Ajustes — configuración general de la herramienta (por ahora, el envío de correo)
+// ═══════════════════════════════════════════════════════════════════════════════
+function Ajustes() {
+  const [resendKey, setResendKey] = useState(() => localStorage.getItem("mrblue_resend_key") || "");
+  const [fromEmail, setFromEmail] = useState(() => localStorage.getItem("mrblue_from_email") || "");
+
+  return (
+    <div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 14 }}>⚙ Ajustes</div>
+
+      <div style={cardStyle}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 12 }}>
+          ✉ Envío de correo (Resend)
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <label style={labelStyle}>API Key de Resend</label>
+            <input value={resendKey} onChange={e => { setResendKey(e.target.value); localStorage.setItem("mrblue_resend_key", e.target.value); }}
+              type="password" placeholder="re_xxxxxxxxxxxx" style={inputStyle} />
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+              Plan gratuito en <a href="https://resend.com" target="_blank" rel="noreferrer" style={{ color: C.cyan }}>resend.com</a>: 3,000 correos/mes
+            </div>
+          </div>
+          <div>
+            <label style={labelStyle}>Correo remitente (verificado en Resend)</label>
+            <input value={fromEmail} onChange={e => { setFromEmail(e.target.value); localStorage.setItem("mrblue_from_email", e.target.value); }}
+              placeholder="cotizaciones@mrblue.ink" style={inputStyle} />
+          </div>
+          {resendKey && fromEmail && (
+            <div style={{ fontSize: 12, color: C.green, fontWeight: 700 }}>✓ Configurado — ya puedes enviar correos reales desde ✉ Enviar solicitud.</div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
+        Esto se guarda en este navegador (localStorage) — si abres el Cotizador desde otra computadora o navegador, vas a tener que capturarlo de nuevo ahí.
+      </div>
+    </div>
+  );
+}
+
 function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotizacion }) {
   const [proveedorNombre, setProveedorNombre] = useState("");
   const [proveedorEmail, setProveedorEmail]   = useState("");
@@ -3759,7 +3801,6 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [fromEmail, setFromEmail]             = useState(() => localStorage.getItem("mrblue_from_email") || "");
   const [enviando, setEnviando]               = useState(false);
   const [resultados, setResultados]           = useState([]);
-  const [showConfig, setShowConfig]           = useState(false);
   const [savedTemplates, setSavedTemplates]   = useState(DEFAULT_TEMPLATES);
   const [mensajeEditado, setMensajeEditado]   = useState("");
   const [editado, setEditado]                 = useState(false);
@@ -3827,7 +3868,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [indiceWhatsApp, setIndiceWhatsApp] = useState(-1); // -1 = no hay cola activa
 
   const enviarCorreoATodos = async () => {
-    if (!resendKey || !fromEmail) { setShowConfig(true); return; }
+    if (!resendKey || !fromEmail) return;
     setEnviandoTodos(true);
     const conCorreo = proveedoresParaEnviar.filter(p => p.email);
     let exitosos = 0, fallidos = 0, primerError = null;
@@ -3922,25 +3963,13 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
 
   return (
     <div>
-      <div style={{ ...cardStyle, borderColor: showConfig ? C.cyan : C.border }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>⚙ Configuración de envío</span>
-          <button onClick={() => setShowConfig(!showConfig)} style={{ background: "none", border: "none", cursor: "pointer", color: C.cyan, fontSize: 13, fontWeight: 700 }}>{showConfig ? "Cerrar ▲" : "Configurar ▼"}</button>
+      {(!resendKey || !fromEmail) && (
+        <div style={{ ...cardStyle, borderColor: C.amber, background: "#FFF9E8", marginBottom: 12 }}>
+          <span style={{ fontSize: 12.5, color: C.text }}>
+            ⚠ Todavía no configuraste el envío de correo real — ve a la pestaña <b>⚙ Ajustes</b> para capturar tu API Key de Resend y el correo remitente.
+          </span>
         </div>
-        {showConfig && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
-            <div>
-              <label style={labelStyle}>API Key de Resend</label>
-              <input value={resendKey} onChange={e => { setResendKey(e.target.value); localStorage.setItem("mrblue_resend_key", e.target.value); }} type="password" placeholder="re_xxxxxxxxxxxx" style={inputStyle} />
-              <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>Plan gratuito en <a href="https://resend.com" target="_blank" rel="noreferrer" style={{ color: C.cyan }}>resend.com</a>: 3,000 correos/mes</div>
-            </div>
-            <div>
-              <label style={labelStyle}>Correo remitente (verificado en Resend)</label>
-              <input value={fromEmail} onChange={e => { setFromEmail(e.target.value); localStorage.setItem("mrblue_from_email", e.target.value); }} placeholder="cotizaciones@mrblue.com.mx" style={inputStyle} />
-            </div>
-          </div>
-        )}
-      </div>
+      )}
 
       {tiempoEstimado && (
         <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: C.text, marginBottom: 12 }}>
@@ -4761,6 +4790,7 @@ export default function App() {
     { key: "histcot",    label: "📈 Historial cotizaciones" },
     { key: "admin",      label: "🏭 Proveedores"       },
     { key: "templates",  label: "📝 Templates"         },
+    { key: "ajustes",    label: "⚙ Ajustes"           },
   ];
 
   const handleGuardarCot = (cot) => {
@@ -4839,6 +4869,7 @@ export default function App() {
         {tab === "histcot"    && <HistorialPreciosCotizaciones />}
         {tab === "admin"     && <AdminProveedores />}
         {tab === "templates" && <AdminTemplates />}
+        {tab === "ajustes" && <Ajustes />}
       </div>
     </div>
   );
