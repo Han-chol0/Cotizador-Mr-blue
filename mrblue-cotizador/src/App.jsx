@@ -3805,7 +3805,15 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [mensajeEditado, setMensajeEditado]   = useState("");
   const [editado, setEditado]                 = useState(false);
   const [tipoServicioPorProveedor, setTipoServicioPorProveedor] = useState({}); // { [provId]: tipoServicioOverride }
-  const [marcadosEnviados, setMarcadosEnviados] = useState({}); // { [provId]: true }
+  // A quién ya le mandaste queda guardado por cotización (localStorage), para que si
+  // te interrumpes a la mitad y recargas, no pierdas la cuenta de dónde te quedaste.
+  const claveEnviados = "mrblue_enviados_" + (cotizacion?.cot_id || cotizacion?.folio || "sin-folio");
+  const [marcadosEnviados, setMarcadosEnviados] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(claveEnviados) || "{}"); } catch { return {}; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(claveEnviados, JSON.stringify(marcadosEnviados)); } catch {}
+  }, [marcadosEnviados, claveEnviados]);
   const [mensajesEditados, setMensajesEditados] = useState({}); // { [provId]: textoEditado }
   const [todosProveedores, setTodosProveedores] = useState([]);
   const [proveedoresElegidos, setProveedoresElegidos] = useState({}); // { [provId]: true } — a quién sí le vas a pedir cotización
@@ -3898,11 +3906,14 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   // WhatsApp no tiene forma real de "enviar solo" sin la API de negocios de Meta (de paga).
   // En vez de abrir todas las pestañas de jalón (el navegador las bloqueaba como spam),
   // se va uno por uno: arma la cola, abre solo la primera, y con "Siguiente" avanza.
-  const iniciarColaWhatsApp = () => {
-    const conWa = proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "").length > 0);
+  // soloPendientes = deja fuera a los que ya marcaste como enviados.
+  const iniciarColaWhatsApp = (soloPendientes = false) => {
+    const conWa = proveedoresParaEnviar.filter(p =>
+      (p.whatsapp || "").replace(/\D/g, "").length > 0 && (!soloPendientes || !marcadosEnviados[p.id]));
+    if (conWa.length === 0) return;
     setColaWhatsApp(conWa);
     setIndiceWhatsApp(0);
-    setResumenEnvioWhats({ total: conWa.length, sinWhats: proveedoresParaEnviar.length - conWa.length });
+    setResumenEnvioWhats({ total: conWa.length, sinWhats: proveedoresParaEnviar.length - proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "").length > 0).length });
   };
 
   const abrirWhatsAppActual = () => {
@@ -4035,21 +4046,39 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                   </div>
                 </div>
 
-                {proveedoresParaEnviar.length > 0 && (
+                {proveedoresParaEnviar.length > 0 && (() => {
+                  const conWa = proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, ""));
+                  const pendientesWa = conWa.filter(p => !marcadosEnviados[p.id]);
+                  const yaEnviados = proveedoresParaEnviar.filter(p => marcadosEnviados[p.id]).length;
+                  return (
             <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "12px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: C.navy }}>
                   📤 Enviar a {proveedoresParaEnviar.length} proveedor{proveedoresParaEnviar.length > 1 ? "es" : ""} — mensaje ya adaptado a cada servicio
+                  {yaEnviados > 0 && <span style={{ color: C.green, fontWeight: 400 }}> · {yaEnviados} ya contactado{yaEnviados > 1 ? "s" : ""}</span>}
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button onClick={enviarCorreoATodos} disabled={enviandoTodos || proveedoresParaEnviar.filter(p => p.email).length === 0}
                     style={{ ...btn(C.coral, true), fontSize: 12, padding: "6px 14px", opacity: enviandoTodos ? 0.6 : 1 }}>
                     {enviandoTodos ? "Enviando…" : `📧 Correo a todos (${proveedoresParaEnviar.filter(p => p.email).length})`}
                   </button>
-                  <button onClick={iniciarColaWhatsApp} disabled={indiceWhatsApp >= 0 || proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length === 0}
+                  <button onClick={() => iniciarColaWhatsApp(false)} disabled={indiceWhatsApp >= 0 || conWa.length === 0}
                     style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px", opacity: indiceWhatsApp >= 0 ? 0.6 : 1 }}>
-                    {`💬 WhatsApp a todos (${proveedoresParaEnviar.filter(p => (p.whatsapp || "").replace(/\D/g, "")).length})`}
+                    {`💬 WhatsApp a todos (${conWa.length})`}
                   </button>
+                  {pendientesWa.length > 0 && pendientesWa.length < conWa.length && (
+                    <button onClick={() => iniciarColaWhatsApp(true)} disabled={indiceWhatsApp >= 0}
+                      style={{ ...btn(C.navy, true), fontSize: 12, padding: "6px 14px", opacity: indiceWhatsApp >= 0 ? 0.6 : 1 }}>
+                      {`↻ Solo los que faltan (${pendientesWa.length})`}
+                    </button>
+                  )}
+                  {yaEnviados > 0 && (
+                    <button onClick={() => setMarcadosEnviados({})}
+                      style={{ ...btn(C.bg, true), color: C.muted, border: `1.5px solid ${C.border}`, fontSize: 11, padding: "6px 10px" }}
+                      title="Borra las marcas de enviado de esta cotización">
+                      Reiniciar marcas
+                    </button>
+                  )}
                 </div>
               </div>
               {resumenEnvioMasivo && (
@@ -4149,7 +4178,8 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                 })}
               </div>
             </div>
-                )}
+                  );
+                })()}
               </>
             );
           })()}
