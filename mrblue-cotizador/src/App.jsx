@@ -75,6 +75,31 @@ function parseCotFromURL() {
   } catch { return null; }
 }
 
+// ─── Leer cot_id desde URL (?cot_id=UUID, generado por Make → Supabase) ──────
+function parseCotIdFromURL() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("cot_id");
+    if (!id) return null;
+    window.history.replaceState({}, "", window.location.pathname);
+    return id;
+  } catch { return null; }
+}
+
+// ─── Traer la solicitud desde Supabase usando el cot_id de la URL ────────────
+async function fetchCotFromSupabase(cotId) {
+  const { data, error } = await supabase
+    .from("solicitudes_cotizador")
+    .select("*")
+    .eq("id", cotId)
+    .single();
+  if (error) {
+    console.error("Error al traer la solicitud desde Supabase:", error);
+    return null;
+  }
+  return data;
+}
+
 function toBool(v) { return v === true || v === "true" || v === 1 || v === "1"; }
 function toStr(v)  { return v != null ? String(v).trim() : ""; }
 
@@ -4361,6 +4386,25 @@ function SolicitudCotizacion({ onGuardar }) {
     if (!saved) return false;
     try { return !!JSON.parse(saved)._from_clickup; } catch { return false; }
   });
+  const [cargandoDeSupabase, setCargandoDeSupabase] = useState(false);
+
+  // ── Prioridad más alta: ?cot_id=UUID en la URL (llega vía Make → Supabase) ──
+  // Se resuelve async, así que corre en un efecto y sobreescribe lo que sea
+  // que haya quedado cargado (URL vieja ?cot= o localStorage) en cuanto llega.
+  useEffect(() => {
+    const cotId = parseCotIdFromURL();
+    if (!cotId) return;
+    setCargandoDeSupabase(true);
+    fetchCotFromSupabase(cotId).then(raw => {
+      if (raw) {
+        const mapped = mapClickUpToCot(raw);
+        localStorage.setItem("mrblue_cot_activa", JSON.stringify(mapped));
+        setCot(mapped);
+        setFromClickUp(true);
+      }
+      setCargandoDeSupabase(false);
+    });
+  }, []);
 
   const set = (field, val) => setCot(prev => ({ ...prev, [field]: val }));
   const setAcabado = (key, val) => setCot(prev => ({ ...prev, acabados: { ...prev.acabados, [key]: val } }));
@@ -4431,6 +4475,11 @@ function SolicitudCotizacion({ onGuardar }) {
 
   return (
     <div>
+      {cargandoDeSupabase && (
+        <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: C.navy }}>
+          ⏳ Cargando datos de la solicitud desde ClickUp…
+        </div>
+      )}
       {/* Header */}
       <div style={{ background: C.navy, borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
