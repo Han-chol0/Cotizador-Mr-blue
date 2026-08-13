@@ -3931,12 +3931,12 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 14 }}>
             <div>
               <label style={labelStyle}>API Key de Resend</label>
-              <input value={resendKey} onChange={e => setResendKey(e.target.value)} type="password" placeholder="re_xxxxxxxxxxxx" style={inputStyle} />
+              <input value={resendKey} onChange={e => { setResendKey(e.target.value); localStorage.setItem("mrblue_resend_key", e.target.value); }} type="password" placeholder="re_xxxxxxxxxxxx" style={inputStyle} />
               <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>Plan gratuito en <a href="https://resend.com" target="_blank" rel="noreferrer" style={{ color: C.cyan }}>resend.com</a>: 3,000 correos/mes</div>
             </div>
             <div>
               <label style={labelStyle}>Correo remitente (verificado en Resend)</label>
-              <input value={fromEmail} onChange={e => setFromEmail(e.target.value)} placeholder="cotizaciones@mrblue.com.mx" style={inputStyle} />
+              <input value={fromEmail} onChange={e => { setFromEmail(e.target.value); localStorage.setItem("mrblue_from_email", e.target.value); }} placeholder="cotizaciones@mrblue.com.mx" style={inputStyle} />
             </div>
           </div>
         )}
