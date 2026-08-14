@@ -106,7 +106,8 @@ function puedeBorrar() { return PUEDE_BORRAR.includes(getUsuario()); }
 // acabados como objeto anidado, etc.) que Supabase rechazaría.
 const COLUMNAS_SUPABASE = [
   "task_id", "nombre_proyecto", "cantidad", "tipo_producto", "prioridad",
-  "fecha_limite", "direccion", "detalles", "tamano_extendido", "tamano_final",
+  "fecha_limite", "direccion", "detalles", "descripcion_proyecto",
+  "tamano_extendido", "tamano_final",
   "tintas_frente", "tintas_vuelta", "lleva_pantone", "pantones",
   "papel_acabado_gramaje", "son_promocionales", "corte", "alzado", "suaje",
   "serigrafia", "doblez", "rustica", "hotmelt", "wireo", "engrapado", "plecado",
@@ -204,6 +205,7 @@ function mapClickUpToCot(raw) {
     tipo_producto:         toStr(raw.tipo_producto || raw.producto)       || "",
     prioridad:             toStr(raw.prioridad)                           || base.prioridad,
     detalles:              toStr(raw.detalles || raw.observaciones)       || "",
+    descripcion_proyecto:  toStr(raw.descripcion_proyecto || raw.description) || "",
     visto_bueno:           toBool(raw.visto_bueno),
     // ── Especificaciones técnicas ──────────────────────────────────────────
     papel_acabado_gramaje: toStr(raw.papel_acabado_gramaje || raw.papel || raw.papel_gramaje) || "",
@@ -4439,6 +4441,7 @@ const emptyCotizacion = () => ({
   visto_bueno: false,
   son_promocionales: false,
   detalles: "",
+  descripcion_proyecto: "",
   tipo_producto: "",
   // Técnico
   papel_acabado_gramaje: "",
@@ -4713,9 +4716,16 @@ function SolicitudCotizacion({ onGuardar }) {
             <CheckRow checked={cot.son_promocionales} onChange={v => set("son_promocionales", v)} label="Son Promocionales" />
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Descripción del proyecto">
+              <textarea value={cot.descripcion_proyecto} onChange={e => set("descripcion_proyecto", e.target.value)}
+                placeholder="qué es el proyecto — viene de la descripción de la tarea en ClickUp"
+                style={{ ...inputStyle, height: 80, resize: "vertical" }} />
+            </Field>
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
             <Field label="Detalles y observaciones de la cotización" required>
               <textarea value={cot.detalles} onChange={e => set("detalles", e.target.value)}
-                placeholder="detalles de la cotización: son promocionales, impresos, empaque, otro... describe la solicitud"
+                placeholder="instrucciones especiales: empacar en paquetes de 1,000 pzas, entregar en dos remesas, etc."
                 style={{ ...inputStyle, height: 80, resize: "vertical" }} />
             </Field>
           </div>
