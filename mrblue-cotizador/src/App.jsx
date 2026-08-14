@@ -86,6 +86,93 @@ function parseCotIdFromURL() {
   } catch { return null; }
 }
 
+// ─── Usuarios del equipo (provisional, hasta que haya login) ────────────────
+// Se elige uno al abrir la app y queda en localStorage. Sirve para firmar los
+// movimientos en la bitácora — cuando metan Supabase Auth, esto se reemplaza.
+const USUARIOS = ["Luis Fe", "Remedios Flores", "Mr. Blue"];
+const USUARIO_KEY = "mrblue_usuario_activo";
+
+function getUsuario()      { return localStorage.getItem(USUARIO_KEY) || ""; }
+function setUsuarioLS(u)   { localStorage.setItem(USUARIO_KEY, u); }
+
+// Quién puede borrar cotizaciones. Sin login esto sólo evita accidentes —
+// cualquiera puede elegir "Luis Fe" en el selector. Cuando haya Supabase Auth,
+// esto debe validarse contra el rol real del usuario, no contra localStorage.
+const PUEDE_BORRAR = ["Luis Fe"];
+function puedeBorrar() { return PUEDE_BORRAR.includes(getUsuario()); }
+
+// Campos que existen como columna en solicitudes_cotizador. Al guardar filtramos
+// contra esta lista para no mandar propiedades internas del cotizador (_from_clickup,
+// acabados como objeto anidado, etc.) que Supabase rechazaría.
+const COLUMNAS_SUPABASE = [
+  "task_id", "nombre_proyecto", "cantidad", "tipo_producto", "prioridad",
+  "fecha_limite", "direccion", "detalles", "tamano_extendido", "tamano_final",
+  "tintas_frente", "tintas_vuelta", "lleva_pantone", "pantones",
+  "papel_acabado_gramaje", "son_promocionales", "corte", "alzado", "suaje",
+  "serigrafia", "doblez", "rustica", "hotmelt", "wireo", "engrapado", "plecado",
+  "pasta_dura", "ensobretado", "empaque_esp", "hotstamping", "visto_bueno",
+  "laminado", "tipo_laminado", "caras_laminado", "tipo_barniz",
+  "hotstamping_color", "tipo_empaque_envio", "estado", "asignado_a", "cliente",
+];
+
+// Convierte el objeto del cotizador de vuelta al formato plano de la tabla.
+function cotAFilaSupabase(cot) {
+  const fila = {};
+  const ac = cot.acabados || {};
+  const fuente = {
+    ...cot,
+    fecha_limite: cot.fecha_respuesta,
+    corte: ac.corte, alzado: ac.alzado, suaje: ac.suaje, serigrafia: ac.serigrafia,
+    doblez: ac.doblez, rustica: ac.rustica, hotmelt: ac.hotmelt, wireo: ac.wireo,
+    engrapado: ac.engrapado, plecado: ac.plecado, pasta_dura: ac.pasta_dura,
+    ensobretado: ac.ensobretado, empaque_esp: ac.empaque_esp, hotstamping: ac.hotstamping,
+  };
+  COLUMNAS_SUPABASE.forEach(col => {
+    const v = fuente[col];
+    if (v === undefined || v === null) return;
+    fila[col] = typeof v === "boolean" ? String(v) : v;
+  });
+  return fila;
+}
+
+// Guarda los cambios de una cotización en Supabase.
+async function guardarCotEnSupabase(supabaseId, cot) {
+  if (!supabaseId) return { error: null, saltado: true };
+  const fila = cotAFilaSupabase(cot);
+  fila.updated_at = new Date().toISOString();
+  const { error } = await supabase
+    .from("solicitudes_cotizador")
+    .update(fila)
+    .eq("id", supabaseId);
+  if (error) console.error("Error al guardar en Supabase:", error);
+  return { error };
+}
+
+// ─── Estados del flujo de una cotización ────────────────────────────────────
+const ESTADOS = [
+  { key: "Nueva",                label: "Nueva",                color: "#7C4DFF" },
+  { key: "En proceso",           label: "En proceso",           color: "#0095D4" },
+  { key: "Enviada a proveedores",label: "Enviada a proveedores",color: "#F39C12" },
+  { key: "Precios recibidos",    label: "Precios recibidos",    color: "#16A085" },
+  { key: "Cotizada",             label: "Cotizada",             color: "#27AE60" },
+  { key: "Cerrada",              label: "Cerrada",              color: "#6B7A8D" },
+  { key: "Perdida",              label: "Perdida",              color: "#E74C3C" },
+];
+const colorEstado = (e) => (ESTADOS.find(x => x.key === e) || ESTADOS[0]).color;
+
+// ─── Bitácora: deja constancia de quién hizo qué ────────────────────────────
+async function logMovimiento(cotizacionId, accion, detalle) {
+  if (!cotizacionId) return;
+  try {
+    await supabase.from("cotizacion_bitacora").insert({
+      cotizacion_id: cotizacionId,
+      usuario: getUsuario() || "Desconocido",
+      accion,
+      detalle: detalle || "",
+    });
+  } catch (e) { console.error("No se pudo escribir en la bitácora:", e); }
+}
+
 // ─── Traer la solicitud desde Supabase usando el cot_id de la URL ────────────
 async function fetchCotFromSupabase(cotId) {
   const { data, error } = await supabase
@@ -3036,11 +3123,15 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Historial de cotizaciones — todos los folios con sus precios a través del tiempo
 // ═══════════════════════════════════════════════════════════════════════════════
-function HistorialPreciosCotizaciones() {
+// Muestra el historial de precios. Sin props lista todas las cotizaciones;
+// con cotIdFiltro muestra sólo la de esa cotización (para verlo desde adentro).
+function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
   const money = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const [busqueda, setBusqueda] = useState("");
-  const [abierto, setAbierto] = useState(null); // cot_id expandido
-  const todas = loadHistorialPrecios();
+  const [abierto, setAbierto] = useState(cotIdFiltro || null); // cot_id expandido
+  const todas = cotIdFiltro
+    ? loadHistorialPrecios().filter(h => h.cot_id === cotIdFiltro)
+    : loadHistorialPrecios();
 
   // Agrupa por cot_id, más reciente primero dentro de cada grupo y entre grupos.
   const grupos = {};
@@ -3063,9 +3154,13 @@ function HistorialPreciosCotizaciones() {
 
   if (todas.length === 0) {
     return (
-      <div style={{ textAlign: "center", padding: 40, color: C.muted }}>
-        <div style={{ fontSize: 32, marginBottom: 10 }}>📈</div>
-        <div style={{ fontSize: 14 }}>Todavía no has guardado ninguna cotización.</div>
+      <div style={{ textAlign: "center", padding: cotIdFiltro ? 18 : 40, color: C.muted }}>
+        {!cotIdFiltro && <div style={{ fontSize: 32, marginBottom: 10 }}>📈</div>}
+        <div style={{ fontSize: cotIdFiltro ? 12.5 : 14 }}>
+          {cotIdFiltro
+            ? "Esta cotización todavía no tiene precios guardados."
+            : "Todavía no has guardado ninguna cotización."}
+        </div>
         <div style={{ fontSize: 12, marginTop: 6 }}>En 💵 Cotizar, dale "💾 Guardar cotización" para que empiece a aparecer aquí.</div>
       </div>
     );
@@ -3076,10 +3171,13 @@ function HistorialPreciosCotizaciones() {
 
   return (
     <div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 14 }}>📈 Historial de cotizaciones</div>
-
-      <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
-        placeholder="Buscar por folio, proyecto o cliente…" style={{ ...inputStyle, marginBottom: 14 }} />
+      {!cotIdFiltro && (
+        <>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 14 }}>📈 Historial de cotizaciones</div>
+          <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
+            placeholder="Buscar por folio, proyecto o cliente…" style={{ ...inputStyle, marginBottom: 14 }} />
+        </>
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {listaGrupos.map(g => {
@@ -3779,40 +3877,70 @@ function AdminTemplates() {
 // MÓDULO: Ajustes — configuración general de la herramienta (por ahora, el envío de correo)
 // ═══════════════════════════════════════════════════════════════════════════════
 function Ajustes() {
+  const [seccion, setSeccion] = useState("general");
   const [resendKey, setResendKey] = useState(() => localStorage.getItem("mrblue_resend_key") || "");
   const [fromEmail, setFromEmail] = useState(() => localStorage.getItem("mrblue_from_email") || "");
+
+  const secciones = [
+    { key: "general",     label: "⚙ General"      },
+    { key: "proveedores", label: "🏭 Proveedores"  },
+    { key: "templates",   label: "📝 Templates"    },
+  ];
 
   return (
     <div>
       <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy, marginBottom: 14 }}>⚙ Ajustes</div>
 
-      <div style={cardStyle}>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 12 }}>
-          ✉ Envío de correo (Resend)
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <label style={labelStyle}>API Key de Resend</label>
-            <input value={resendKey} onChange={e => { setResendKey(e.target.value); localStorage.setItem("mrblue_resend_key", e.target.value); }}
-              type="password" placeholder="re_xxxxxxxxxxxx" style={inputStyle} />
-            <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
-              Plan gratuito en <a href="https://resend.com" target="_blank" rel="noreferrer" style={{ color: C.cyan }}>resend.com</a>: 3,000 correos/mes
-            </div>
-          </div>
-          <div>
-            <label style={labelStyle}>Correo remitente (verificado en Resend)</label>
-            <input value={fromEmail} onChange={e => { setFromEmail(e.target.value); localStorage.setItem("mrblue_from_email", e.target.value); }}
-              placeholder="cotizaciones@mrblue.ink" style={inputStyle} />
-          </div>
-          {resendKey && fromEmail && (
-            <div style={{ fontSize: 12, color: C.green, fontWeight: 700 }}>✓ Configurado — ya puedes enviar correos reales desde ✉ Enviar solicitud.</div>
-          )}
-        </div>
+      {/* Sub-navegación */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+        {secciones.map(s => {
+          const activo = seccion === s.key;
+          return (
+            <button key={s.key} onClick={() => setSeccion(s.key)} style={{
+              background: activo ? C.navy : "transparent",
+              color: activo ? "#fff" : C.navy,
+              border: `1.5px solid ${C.navy}`, borderRadius: 20,
+              padding: "5px 13px", fontFamily: "'Space Grotesk',sans-serif",
+              fontSize: 12, fontWeight: 700, cursor: "pointer",
+            }}>{s.label}</button>
+          );
+        })}
       </div>
 
-      <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
-        Esto se guarda en este navegador (localStorage) — si abres el Cotizador desde otra computadora o navegador, vas a tener que capturarlo de nuevo ahí.
-      </div>
+      {seccion === "general" && (
+        <>
+          <div style={cardStyle}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 12 }}>
+              ✉ Envío de correo (Resend)
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <label style={labelStyle}>API Key de Resend</label>
+                <input value={resendKey} onChange={e => { setResendKey(e.target.value); localStorage.setItem("mrblue_resend_key", e.target.value); }}
+                  type="password" placeholder="re_xxxxxxxxxxxx" style={inputStyle} />
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>
+                  Plan gratuito en <a href="https://resend.com" target="_blank" rel="noreferrer" style={{ color: C.cyan }}>resend.com</a>: 3,000 correos/mes
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Correo remitente (verificado en Resend)</label>
+                <input value={fromEmail} onChange={e => { setFromEmail(e.target.value); localStorage.setItem("mrblue_from_email", e.target.value); }}
+                  placeholder="cotizaciones@mrblue.ink" style={inputStyle} />
+              </div>
+              {resendKey && fromEmail && (
+                <div style={{ fontSize: 12, color: C.green, fontWeight: 700 }}>✓ Configurado — ya puedes enviar correos reales desde ✉ Enviar solicitud.</div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
+            Esto se guarda en este navegador (localStorage) — si abres el Cotizador desde otra computadora o navegador, vas a tener que capturarlo de nuevo ahí.
+          </div>
+        </>
+      )}
+
+      {seccion === "proveedores" && <AdminProveedores />}
+      {seccion === "templates"   && <AdminTemplates />}
     </div>
   );
 }
@@ -4388,6 +4516,8 @@ function SolicitudCotizacion({ onGuardar }) {
     try { return !!JSON.parse(saved)._from_clickup; } catch { return false; }
   });
   const [cargandoDeSupabase, setCargandoDeSupabase] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const [syncError, setSyncError] = useState(null);
 
   // ── Prioridad más alta: ?cot_id=UUID en la URL (llega vía Make → Supabase) ──
   // Se resuelve async, así que corre en un efecto y sobreescribe lo que sea
@@ -4399,9 +4529,12 @@ function SolicitudCotizacion({ onGuardar }) {
     fetchCotFromSupabase(cotId).then(raw => {
       if (raw) {
         const mapped = mapClickUpToCot(raw);
+        mapped._supabase_id = raw.id;
+        mapped.cot_id = raw.id;   // liga el historial de precios a esta cotización
         localStorage.setItem("mrblue_cot_activa", JSON.stringify(mapped));
         setCot(mapped);
         setFromClickUp(true);
+        logMovimiento(raw.id, "abierta", "abrió la cotización desde el link de ClickUp");
       }
       setCargandoDeSupabase(false);
     });
@@ -4436,6 +4569,17 @@ function SolicitudCotizacion({ onGuardar }) {
     const cotActiva = { ...cot, cot_id };
     setCot(cotActiva);
     localStorage.setItem("mrblue_cot_activa", JSON.stringify(cotActiva));
+
+    // Si la cotización vino del inbox/ClickUp, sincroniza los cambios a Supabase
+    // para que el resto del equipo vea la versión actualizada.
+    if (cot._supabase_id) {
+      setSincronizando(true);
+      guardarCotEnSupabase(cot._supabase_id, cotActiva).then(({ error }) => {
+        setSincronizando(false);
+        setSyncError(error ? error.message : null);
+        if (!error) logMovimiento(cot._supabase_id, "editada", `guardó la versión ${version}`);
+      });
+    }
 
     onGuardar(cotActiva);
     setGuardado(true);
@@ -4479,6 +4623,16 @@ function SolicitudCotizacion({ onGuardar }) {
       {cargandoDeSupabase && (
         <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: C.navy }}>
           ⏳ Cargando datos de la solicitud desde ClickUp…
+        </div>
+      )}
+      {sincronizando && (
+        <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: C.navy }}>
+          ⏳ Sincronizando con el equipo…
+        </div>
+      )}
+      {syncError && (
+        <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, color: C.red }}>
+          Se guardó en este navegador, pero no se pudo sincronizar con el equipo: {syncError}
         </div>
       )}
       {/* Header */}
@@ -4848,10 +5002,400 @@ function HistorialCotizaciones({ onCargar, onDuplicar, onVolver }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// INBOX DE COTIZACIONES — vista general de todo lo que va entrando
+// ═══════════════════════════════════════════════════════════════════════════════
+function InboxCotizaciones({ onAbrir, cotizacionActivaId }) {
+  const [lista, setLista]         = useState([]);
+  const [cargando, setCargando]   = useState(true);
+  const [error, setError]         = useState(null);
+  const [filtroEstado, setFiltro] = useState("Todas");
+  const [busqueda, setBusqueda]   = useState("");
+  const [bitacora, setBitacora]   = useState({});   // { cotizacionId: [movimientos] }
+  const [verBitacora, setVerBit]  = useState(null); // id expandido (movimientos)
+  const [verPrecios, setVerPrecios] = useState(null); // id expandido (precios)
+  const [editando, setEditando]   = useState(null);   // id en edición rápida
+  const [borrador, setBorrador]   = useState({});     // campos editados en la tarjeta
+  const [confirmarBorrado, setConfirmarBorrado] = useState(null); // id a borrar
+  const [guardandoId, setGuardandoId] = useState(null);
+
+  const cargar = async () => {
+    setCargando(true);
+    const { data, error } = await supabase
+      .from("solicitudes_cotizador")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) { setError(error.message); setLista([]); }
+    else       { setError(null); setLista(data || []); }
+    setCargando(false);
+  };
+
+  useEffect(() => { cargar(); }, []);
+
+  const cambiarEstado = async (cot, nuevo) => {
+    const anterior = cot.estado || "Nueva";
+    if (anterior === nuevo) return;
+    setLista(prev => prev.map(c => c.id === cot.id ? { ...c, estado: nuevo } : c));
+    const { error } = await supabase
+      .from("solicitudes_cotizador")
+      .update({ estado: nuevo, updated_at: new Date().toISOString() })
+      .eq("id", cot.id);
+    if (error) { console.error(error); cargar(); return; }
+    logMovimiento(cot.id, "estado", `${anterior} → ${nuevo}`);
+    if (verBitacora === cot.id) cargarBitacora(cot.id);
+  };
+
+  const cargarBitacora = async (cotId) => {
+    const { data } = await supabase
+      .from("cotizacion_bitacora")
+      .select("*")
+      .eq("cotizacion_id", cotId)
+      .order("created_at", { ascending: false })
+      .limit(30);
+    setBitacora(prev => ({ ...prev, [cotId]: data || [] }));
+  };
+
+  const toggleBitacora = (cotId) => {
+    if (verBitacora === cotId) { setVerBit(null); return; }
+    setVerBit(cotId);
+    if (!bitacora[cotId]) cargarBitacora(cotId);
+  };
+
+  // ── Edición rápida desde la tarjeta ──────────────────────────────────────
+  const abrirEdicion = (cot) => {
+    setEditando(cot.id);
+    setBorrador({
+      nombre_proyecto: cot.nombre_proyecto || "",
+      cliente:         cot.cliente || "",
+      cantidad:        cot.cantidad || "",
+      tipo_producto:   cot.tipo_producto || "",
+      asignado_a:      cot.asignado_a || "",
+    });
+  };
+
+  const guardarEdicion = async (cot) => {
+    setGuardandoId(cot.id);
+    const cambios = [];
+    Object.entries(borrador).forEach(([k, v]) => {
+      const antes = cot[k] || "";
+      if (String(antes) !== String(v)) cambios.push(`${k}: "${antes}" → "${v}"`);
+    });
+    const { error } = await supabase
+      .from("solicitudes_cotizador")
+      .update({ ...borrador, updated_at: new Date().toISOString() })
+      .eq("id", cot.id);
+    setGuardandoId(null);
+    if (error) { alert("No se pudo guardar: " + error.message); return; }
+    setLista(prev => prev.map(c => c.id === cot.id ? { ...c, ...borrador } : c));
+    if (cambios.length) logMovimiento(cot.id, "editada", cambios.join(" · "));
+    setEditando(null);
+    if (verBitacora === cot.id) cargarBitacora(cot.id);
+  };
+
+  // ── Borrado definitivo ───────────────────────────────────────────────────
+  const borrar = async (cot) => {
+    const { error } = await supabase
+      .from("solicitudes_cotizador")
+      .delete()
+      .eq("id", cot.id);
+    if (error) { alert("No se pudo borrar: " + error.message); return; }
+    setLista(prev => prev.filter(c => c.id !== cot.id));
+    setConfirmarBorrado(null);
+  };
+
+  const visibles = lista.filter(c => {
+    if (filtroEstado !== "Todas" && (c.estado || "Nueva") !== filtroEstado) return false;
+    if (busqueda.trim()) {
+      const q = busqueda.toLowerCase();
+      return (c.nombre_proyecto || "").toLowerCase().includes(q)
+          || (c.cliente || "").toLowerCase().includes(q)
+          || (c.task_id || "").toLowerCase().includes(q);
+    }
+    return true;
+  });
+
+  // Cuántas hay en cada estado, para los contadores de los filtros
+  const conteo = (est) => est === "Todas"
+    ? lista.length
+    : lista.filter(c => (c.estado || "Nueva") === est).length;
+
+  const fechaCorta = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return d.toLocaleDateString("es-MX", { day: "2-digit", month: "short" })
+         + " · " + d.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
+  };
+
+  return (
+    <div>
+      {/* Encabezado */}
+      <div style={{ background: C.navy, borderRadius: 10, padding: "14px 18px", marginBottom: 14,
+        display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "#fff", fontSize: 15 }}>
+            Cotizaciones
+          </div>
+          <div style={{ fontSize: 11, color: "#8BBDD6", marginTop: 2 }}>
+            {cargando ? "Cargando…" : `${lista.length} en total · ${conteo("Nueva")} sin abrir`}
+          </div>
+        </div>
+        <button onClick={cargar} style={{ background: "none", border: "1.5px solid #8BBDD6", color: "#8BBDD6",
+          borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+          ↻ Actualizar
+        </button>
+      </div>
+
+      {/* Buscador */}
+      <input
+        value={busqueda}
+        onChange={e => setBusqueda(e.target.value)}
+        placeholder="Buscar por proyecto, cliente o task ID…"
+        style={{ ...inputStyle, marginBottom: 10 }}
+      />
+
+      {/* Filtros por estado */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+        {["Todas", ...ESTADOS.map(e => e.key)].map(est => {
+          const activo = filtroEstado === est;
+          const col = est === "Todas" ? C.navy : colorEstado(est);
+          const n = conteo(est);
+          return (
+            <button key={est} onClick={() => setFiltro(est)} style={{
+              background: activo ? col : "transparent",
+              color: activo ? "#fff" : col,
+              border: `1.5px solid ${col}`, borderRadius: 20,
+              padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+              opacity: n === 0 && !activo ? 0.4 : 1,
+            }}>
+              {est} {n > 0 && <span style={{ opacity: 0.8 }}>· {n}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {error && (
+        <div style={{ ...cardStyle, borderColor: C.red, color: C.red, fontSize: 13 }}>
+          No se pudieron cargar las cotizaciones: {error}
+        </div>
+      )}
+
+      {!cargando && visibles.length === 0 && !error && (
+        <div style={{ ...cardStyle, textAlign: "center", color: C.muted, fontSize: 13 }}>
+          {lista.length === 0
+            ? "Todavía no ha entrado ninguna cotización. En cuanto alguien llene el formulario de ClickUp, aparece aquí."
+            : "Ninguna cotización coincide con el filtro."}
+        </div>
+      )}
+
+      {/* Tarjetas */}
+      {visibles.map(cot => {
+        const esActiva = cot.id === cotizacionActivaId;
+        const estado = cot.estado || "Nueva";
+        return (
+          <div key={cot.id} style={{
+            ...cardStyle,
+            borderColor: esActiva ? C.cyan : C.border,
+            borderWidth: esActiva ? 2 : 1.5,
+            padding: "14px 16px",
+          }}>
+            {/* Fila 1: nombre + estado */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: C.text }}>
+                  {cot.nombre_proyecto || "Sin nombre"}
+                  {esActiva && <span style={{ background: C.cyan, color: "#fff", borderRadius: 10, padding: "1px 8px", fontSize: 10, marginLeft: 8 }}>abierta</span>}
+                </div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
+                  {fechaCorta(cot.created_at)}
+                  {cot.task_id && <> · <span style={{ fontFamily: "monospace" }}>{cot.task_id}</span></>}
+                  {cot.asignado_a && <> · {cot.asignado_a}</>}
+                </div>
+              </div>
+              <select
+                value={estado}
+                onChange={e => cambiarEstado(cot, e.target.value)}
+                style={{
+                  background: colorEstado(estado), color: "#fff", border: "none",
+                  borderRadius: 20, padding: "4px 10px", fontSize: 11, fontWeight: 700,
+                  cursor: "pointer", appearance: "none", textAlign: "center",
+                }}>
+                {ESTADOS.map(e => <option key={e.key} value={e.key} style={{ background: "#fff", color: C.text }}>{e.label}</option>)}
+              </select>
+            </div>
+
+            {/* Fila 2: datos clave */}
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 10, fontSize: 12, color: C.text }}>
+              {cot.cantidad && <span><b>{parseInt(cot.cantidad).toLocaleString("es-MX")}</b> pzas</span>}
+              {cot.tipo_producto && <span>{cot.tipo_producto}</span>}
+              {cot.tamano_final && <span>{cot.tamano_final}</span>}
+              {cot.papel_acabado_gramaje && <span style={{ color: C.muted }}>{cot.papel_acabado_gramaje}</span>}
+              {cot.prioridad && cot.prioridad !== "normal" && (
+                <span style={{ color: cot.prioridad === "urgent" ? C.red : C.amber, fontWeight: 700 }}>
+                  {cot.prioridad}
+                </span>
+              )}
+            </div>
+
+            {/* Fila 3: acciones */}
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              <button onClick={() => onAbrir(cot)} style={{ ...btn(C.cyan), fontSize: 12 }}>
+                Abrir →
+              </button>
+              <button onClick={() => toggleBitacora(cot.id)} style={{
+                background: "none", border: `1.5px solid ${C.border}`, color: C.muted,
+                borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                {verBitacora === cot.id ? "Ocultar movimientos" : "🕓 Movimientos"}
+              </button>
+              <button onClick={() => setVerPrecios(verPrecios === cot.id ? null : cot.id)} style={{
+                background: "none", border: `1.5px solid ${C.border}`, color: C.muted,
+                borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                {verPrecios === cot.id ? "Ocultar precios" : "📈 Precios"}
+              </button>
+              <button onClick={() => editando === cot.id ? setEditando(null) : abrirEdicion(cot)} style={{
+                background: "none", border: `1.5px solid ${C.border}`, color: C.muted,
+                borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                ✏️ Editar
+              </button>
+              {puedeBorrar() && (
+                <button onClick={() => setConfirmarBorrado(confirmarBorrado === cot.id ? null : cot.id)} style={{
+                  background: "none", border: `1.5px solid ${C.red}`, color: C.red,
+                  borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+                  marginLeft: "auto" }}>
+                  🗑 Borrar
+                </button>
+              )}
+            </div>
+
+            {/* Edición rápida */}
+            {editando === cot.id && (
+              <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 12,
+                display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                <div>
+                  <label style={labelStyle}>Nombre del proyecto</label>
+                  <input value={borrador.nombre_proyecto} style={inputStyle}
+                    onChange={e => setBorrador(b => ({ ...b, nombre_proyecto: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Cliente</label>
+                  <input value={borrador.cliente} style={inputStyle}
+                    onChange={e => setBorrador(b => ({ ...b, cliente: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Cantidad (pz)</label>
+                  <input value={borrador.cantidad} style={inputStyle}
+                    onChange={e => setBorrador(b => ({ ...b, cantidad: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Producto</label>
+                  <select value={borrador.tipo_producto} style={{ ...inputStyle, appearance: "none" }}
+                    onChange={e => setBorrador(b => ({ ...b, tipo_producto: e.target.value }))}>
+                    <option value="">Selecciona…</option>
+                    {TIPOS_PRODUCTO.map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Asignado a</label>
+                  <select value={borrador.asignado_a} style={{ ...inputStyle, appearance: "none" }}
+                    onChange={e => setBorrador(b => ({ ...b, asignado_a: e.target.value }))}>
+                    <option value="">Sin asignar</option>
+                    {USUARIOS.map(u => <option key={u}>{u}</option>)}
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                  <button onClick={() => guardarEdicion(cot)} disabled={guardandoId === cot.id}
+                    style={{ ...btn(C.green), fontSize: 12, opacity: guardandoId === cot.id ? 0.6 : 1 }}>
+                    {guardandoId === cot.id ? "Guardando…" : "Guardar"}
+                  </button>
+                  <button onClick={() => setEditando(null)} style={{
+                    background: "none", border: `1.5px solid ${C.border}`, color: C.muted,
+                    borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Confirmación de borrado */}
+            {confirmarBorrado === cot.id && (
+              <div style={{ marginTop: 12, background: "#FEF2F2", border: `1.5px solid ${C.red}`,
+                borderRadius: 8, padding: "12px 14px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: C.red, marginBottom: 4 }}>
+                  ¿Borrar "{cot.nombre_proyecto || "sin nombre"}"?
+                </div>
+                <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
+                  Se elimina de Supabase junto con todos sus movimientos. Esto no se puede deshacer.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => borrar(cot)} style={{ ...btn(C.red), fontSize: 12 }}>
+                    Sí, borrar definitivamente
+                  </button>
+                  <button onClick={() => setConfirmarBorrado(null)} style={{
+                    background: "none", border: `1.5px solid ${C.border}`, color: C.muted,
+                    borderRadius: 8, padding: "7px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Historial de precios de esta cotización */}
+            {verPrecios === cot.id && (
+              <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 4 }}>
+                <HistorialPreciosCotizaciones cotIdFiltro={cot.id} />
+              </div>
+            )}
+
+            {/* Bitácora expandida */}
+            {verBitacora === cot.id && (
+              <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+                {!bitacora[cot.id] && <div style={{ fontSize: 12, color: C.muted }}>Cargando…</div>}
+                {bitacora[cot.id]?.length === 0 && (
+                  <div style={{ fontSize: 12, color: C.muted }}>Sin movimientos registrados todavía.</div>
+                )}
+                {bitacora[cot.id]?.map(m => (
+                  <div key={m.id} style={{ display: "flex", gap: 8, fontSize: 12, padding: "3px 0", color: C.text }}>
+                    <span style={{ color: C.muted, minWidth: 96, fontSize: 11 }}>{fechaCorta(m.created_at)}</span>
+                    <span style={{ fontWeight: 600 }}>{m.usuario}</span>
+                    <span style={{ color: C.muted }}>{m.detalle || m.accion}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Selector de usuario (provisional, mientras no hay login) ───────────────
+function SelectorUsuario({ onElegir }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,58,95,0.96)", zIndex: 999,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: C.card, borderRadius: 12, padding: "28px 26px", maxWidth: 360, width: "100%" }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: C.text, marginBottom: 6 }}>
+          ¿Quién eres?
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 18 }}>
+          Se usa para firmar los movimientos en el historial de cada cotización.
+        </div>
+        {USUARIOS.map(u => (
+          <button key={u} onClick={() => onElegir(u)} style={{
+            ...btn(C.navy, true), marginBottom: 8, textAlign: "left", paddingLeft: 14 }}>
+            {u}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // APP PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  const [tab, setTab] = useState("cotizacion");
+  const [tab, setTab] = useState("inbox");
+  const [usuario, setUsuario] = useState(() => getUsuario());
   const [calcData, setCalcData]     = useState(null);
   const [tiempoEstimado, setTiempoEstimado] = useState(null); // {horas, maquinaNombre} o null
   const [proveedoresCotizacion, setProveedoresCotizacion] = useState([]); // [{id, nombre, email, whatsapp}]
@@ -4861,15 +5405,13 @@ export default function App() {
   });
 
   const tabs = [
-    { key: "cotizacion", label: "📋 Cotización"       },
+    { key: "inbox",      label: "🗂 Cotizaciones"     },
+    { key: "cotizacion", label: "📋 Solicitud"        },
     { key: "calc",       label: "📐 Pliegos"          },
     { key: "envio",      label: "✉ Enviar solicitud"  },
     { key: "cotizar",    label: "💵 Cotizar"          },
     { key: "seg",        label: "📋 Seguimiento"       },
     { key: "cronograma", label: "📅 Cronograma"        },
-    { key: "histcot",    label: "📈 Historial cotizaciones" },
-    { key: "admin",      label: "🏭 Proveedores"       },
-    { key: "templates",  label: "📝 Templates"         },
     { key: "ajustes",    label: "⚙ Ajustes"           },
   ];
 
@@ -4877,6 +5419,23 @@ export default function App() {
     setCotizacion(cot);
     setTab("calc");
   };
+
+  // Abrir una cotización del inbox: la vuelve la activa y salta a la solicitud
+  const handleAbrirDelInbox = (registro) => {
+    const mapped = mapClickUpToCot(registro);
+    mapped._supabase_id = registro.id;
+    // El id de Supabase es también el cot_id: así el historial de precios que se
+    // guarde desde 💵 Cotizar queda ligado a esta cotización y no a un UUID suelto.
+    mapped.cot_id = registro.id;
+    setCotizacion(mapped);
+    localStorage.setItem("mrblue_cot_activa", JSON.stringify(mapped));
+    logMovimiento(registro.id, "abierta", `${usuario} abrió la cotización`);
+    setTab("cotizacion");
+  };
+
+  const elegirUsuario = (u) => { setUsuarioLS(u); setUsuario(u); };
+
+  if (!usuario) return <SelectorUsuario onElegir={elegirUsuario} />;
 
   return (
     <div style={{ fontFamily: "Inter, sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
@@ -4894,16 +5453,24 @@ export default function App() {
             </div>
           </div>
         </div>
-        {cotizacion && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ background: cotizacion.prioridad === "Normal" ? C.muted : cotizacion.prioridad === "Urgente" ? C.amber : C.red, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
-              {cotizacion.prioridad}
-            </span>
-            <span style={{ fontSize: 11, color: "#8BBDD6" }}>
-              {cotizacion.cantidad ? parseInt(cotizacion.cantidad).toLocaleString("es-MX") + " pzas" : ""}
-            </span>
-          </div>
-        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {cotizacion && (
+            <>
+              <span style={{ background: cotizacion.prioridad === "Normal" ? C.muted : cotizacion.prioridad === "Urgente" ? C.amber : C.red, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+                {cotizacion.prioridad}
+              </span>
+              <span style={{ fontSize: 11, color: "#8BBDD6" }}>
+                {cotizacion.cantidad ? parseInt(cotizacion.cantidad).toLocaleString("es-MX") + " pzas" : ""}
+              </span>
+            </>
+          )}
+          <button onClick={() => { setUsuarioLS(""); setUsuario(""); }}
+            title="Cambiar de usuario"
+            style={{ background: "rgba(255,255,255,0.12)", border: "none", color: "#fff",
+              borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            {usuario}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: "flex", borderBottom: `2px solid ${C.border}`, background: C.card, paddingLeft: 16, overflowX: "auto" }}>
@@ -4918,6 +5485,12 @@ export default function App() {
       </div>
 
       <div style={{ maxWidth: 740, margin: "0 auto", padding: "20px 14px" }}>
+        {tab === "inbox" && (
+          <InboxCotizaciones
+            onAbrir={handleAbrirDelInbox}
+            cotizacionActivaId={cotizacion?._supabase_id}
+          />
+        )}
         {tab === "cotizacion" && (
           <SolicitudCotizacion onGuardar={handleGuardarCot} />
         )}
@@ -4946,9 +5519,6 @@ export default function App() {
         )}
         {tab === "seg"       && <Seguimiento />}
         {tab === "cronograma" && <CronogramaGeneral />}
-        {tab === "histcot"    && <HistorialPreciosCotizaciones />}
-        {tab === "admin"     && <AdminProveedores />}
-        {tab === "templates" && <AdminTemplates />}
         {tab === "ajustes" && <Ajustes />}
       </div>
     </div>
