@@ -112,7 +112,7 @@ const COLUMNAS_SUPABASE = [
   "papel_acabado_gramaje", "son_promocionales", "corte", "alzado", "suaje",
   "serigrafia", "doblez", "rustica", "hotmelt", "wireo", "engrapado", "plecado",
   "pasta_dura", "ensobretado", "empaque_esp", "hotstamping", "visto_bueno",
-  "laminado", "tipo_laminado", "caras_laminado", "tipo_barniz",
+  "laminado", "tipo_laminado", "caras_laminado", "barniz_uv", "tipo_barniz",
   "hotstamping_color", "tipo_empaque_envio", "estado", "asignado_a", "cliente",
 ];
 
@@ -243,7 +243,7 @@ function mapClickUpToCot(raw) {
     laminado:          toBool(raw.laminado),
     tipo_laminado:     toStr(raw.tipo_laminado)     || "",
     caras_laminado:    toStr(raw.caras_laminado)    || "",
-    barniz_uv:         toBool(raw.barniz_uv) || !!toStr(raw.tipo_barniz),
+    barniz_uv:         toBool(raw.barniz_uv),
     tipo_barniz:       toStr(raw.tipo_barniz)       || "",
     hotstamping_color: toStr(raw.hotstamping_color) || "",
     // ── Meta ───────────────────────────────────────────────────────────────
