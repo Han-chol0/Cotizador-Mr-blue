@@ -3015,6 +3015,20 @@ function StatusBadge({ status }) {
 
 function diasDesde(isoDate) { return Math.floor((Date.now() - new Date(isoDate)) / 86400000); }
 
+// Tiempo que tardó un proveedor en contestar, en formato legible.
+// Menos de un día se muestra en horas, porque "0 días" no dice nada útil.
+function tiempoRespuesta(fechaEnvio, respondidoAt) {
+  if (!fechaEnvio || !respondidoAt) return null;
+  const ms = new Date(respondidoAt) - new Date(fechaEnvio);
+  if (ms < 0) return null;
+  const horas = Math.round(ms / 3600000);
+  if (horas < 1)  return "menos de 1 h";
+  if (horas < 24) return horas + " h";
+  const dias = Math.floor(horas / 24);
+  const resto = horas % 24;
+  return dias + " día" + (dias !== 1 ? "s" : "") + (resto ? " " + resto + " h" : "");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Seguimiento
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3459,7 +3473,9 @@ function RegistrarEntrega({ trabajo, onGuardado, onCancelar }) {
   );
 }
 
-function Seguimiento() {
+// Sin props muestra todas las solicitudes enviadas; con cotIdFiltro sólo las de
+// esa cotización, para poder verlas desde ✉ Enviar solicitud sin cambiar de pestaña.
+function Seguimiento({ cotIdFiltro = null, compacto = false }) {
   const [solicitudes, setSolicitudes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [recordatorioActivo, setRecordatorioActivo] = useState(null);
@@ -3472,6 +3488,11 @@ function Seguimiento() {
   }, []);
 
   const guardar = async (list) => { setSolicitudes(list); await storageSet("solicitudes", list); };
+
+  // Lo que se muestra: todas, o sólo las de esta cotización.
+  const visibles = cotIdFiltro
+    ? solicitudes.filter(s => s.cot_id === cotIdFiltro)
+    : solicitudes;
 
   const marcarRespondido = (id) => {
     guardar(solicitudes.map(s => s.id === id ? { ...s, status: "respondido", respondido_at: new Date().toISOString() } : s));
@@ -3493,18 +3514,39 @@ function Seguimiento() {
   };
 
   if (loading) return <div style={{ color: C.muted, padding: 20, textAlign: "center" }}>Cargando…</div>;
-  const vencidas = solicitudes.filter(s => s.status !== "respondido" && diasDesde(s.fechaEnvio) >= 2);
+  const vencidas = visibles.filter(s => s.status !== "respondido" && diasDesde(s.fechaEnvio) >= 2);
+  const respondidas = visibles.filter(s => s.status === "respondido" && s.respondido_at);
 
   return (
     <div>
+      {/* Resumen de tiempos de respuesta */}
+      {respondidas.length > 0 && (
+        <div style={{ background: "#F0FFF4", border: `1.5px solid ${C.green}`, borderRadius: 8,
+          padding: "9px 14px", marginBottom: 12, fontSize: 12.5, color: C.text }}>
+          ✓ <strong>{respondidas.length}</strong> de <strong>{visibles.length}</strong> ya contestaron
+          {(() => {
+            const horas = respondidas
+              .map(s => (new Date(s.respondido_at) - new Date(s.fechaEnvio)) / 3600000)
+              .filter(h => h >= 0);
+            if (!horas.length) return null;
+            const prom = horas.reduce((a, b) => a + b, 0) / horas.length;
+            const txt = prom < 24 ? Math.round(prom) + " h" : (prom / 24).toFixed(1) + " días";
+            return <> · tiempo promedio de respuesta: <strong>{txt}</strong></>;
+          })()}
+        </div>
+      )}
       {vencidas.length > 0 && (
         <div style={{ background: "#FFF3CD", border: `1.5px solid ${C.amber}`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
           ⚠ <strong>{vencidas.length} proveedor{vencidas.length > 1 ? "es" : ""}</strong> sin respuesta después de 2+ días.
         </div>
       )}
-      {solicitudes.length === 0
-        ? <div style={{ color: C.muted, textAlign: "center", padding: "30px 0", fontSize: 13 }}>Sin solicitudes registradas aún.</div>
-        : solicitudes.map(sol => {
+      {visibles.length === 0
+        ? <div style={{ color: C.muted, textAlign: "center", padding: "30px 0", fontSize: 13 }}>
+            {cotIdFiltro
+              ? "Todavía no has mandado solicitudes para esta cotización."
+              : "Sin solicitudes registradas aún."}
+          </div>
+        : visibles.map(sol => {
           const dias = diasDesde(sol.fechaEnvio);
           const st = sol.status === "respondido" ? "respondido" : dias >= 2 ? "vencido" : "enviado";
           return (
@@ -3517,6 +3559,11 @@ function Seguimiento() {
                     Enviado {new Date(sol.fechaEnvio).toLocaleDateString("es-MX")} · hace {dias} día{dias !== 1 ? "s" : ""}
                     {sol.respondido_at && <span style={{ color: C.green }}> · Respondido {new Date(sol.respondido_at).toLocaleDateString("es-MX")}</span>}
                   </div>
+                  {sol.respondido_at && tiempoRespuesta(sol.fechaEnvio, sol.respondido_at) && (
+                    <div style={{ fontSize: 11, color: C.green, fontWeight: 700, marginTop: 2 }}>
+                      ⏱ Tardó {tiempoRespuesta(sol.fechaEnvio, sol.respondido_at)} en contestar
+                    </div>
+                  )}
                 </div>
                 <StatusBadge status={st} />
               </div>
@@ -3973,6 +4020,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [mensajesEditados, setMensajesEditados] = useState({}); // { [provId]: textoEditado }
   const [todosProveedores, setTodosProveedores] = useState([]);
   const [proveedoresElegidos, setProveedoresElegidos] = useState({}); // { [provId]: true } — a quién sí le vas a pedir cotización
+  const [refrescarSeg, setRefrescarSeg] = useState(0); // fuerza recarga del seguimiento al enviar
 
   useEffect(() => {
     loadProveedoresDB().then(setTodosProveedores);
@@ -4122,10 +4170,17 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
       entry.canales.push("↗ Link WhatsApp listo");
     }
     const existing = await storageGet("solicitudes") || [];
-    existing.unshift({ id: crypto.randomUUID(), proveedor: proveedorNombre, email: proveedorEmail, telefono: proveedorTel, producto: producto || "Sin nombre", qty: calcData?.qty, fechaEnvio: new Date().toISOString(), status: "enviado", waLink: entry.waLink });
+    existing.unshift({
+      id: crypto.randomUUID(),
+      cot_id: cotizacion?.cot_id || null,   // liga la solicitud a su cotización
+      proveedor: proveedorNombre, email: proveedorEmail, telefono: proveedorTel,
+      producto: producto || "Sin nombre", qty: calcData?.qty,
+      fechaEnvio: new Date().toISOString(), status: "enviado", waLink: entry.waLink,
+    });
     await storageSet("solicitudes", existing);
     setResultados([entry]);
     setEnviando(false);
+    setRefrescarSeg(n => n + 1);   // refresca el panel de seguimiento de abajo
   };
 
   return (
@@ -4379,6 +4434,18 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
           <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>Registradas en Seguimiento.</div>
         </div>
       )}
+
+      {/* Seguimiento de esta cotización: quién ya contestó y en cuánto tiempo */}
+      <div style={{ ...cardStyle, marginTop: 18 }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13,
+          color: C.navy, marginBottom: 4 }}>
+          📋 Seguimiento de esta cotización
+        </div>
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
+          Marca aquí cuando un proveedor conteste — el tiempo de respuesta se calcula solo.
+        </div>
+        <Seguimiento key={refrescarSeg} cotIdFiltro={cotizacion?.cot_id || null} />
+      </div>
     </div>
   );
 }
