@@ -106,7 +106,7 @@ function puedeBorrar() { return PUEDE_BORRAR.includes(getUsuario()); }
 // acabados como objeto anidado, etc.) que Supabase rechazaría.
 const COLUMNAS_SUPABASE = [
   "task_id", "nombre_proyecto", "cantidad", "tipo_producto", "prioridad",
-  "fecha_limite", "direccion", "detalles", "descripcion_proyecto",
+  "fecha_limite", "direccion", "detalles", "descripcion_proyecto", "comentarios_empaque",
   "tamano_extendido", "tamano_final",
   "tintas_frente", "tintas_vuelta", "lleva_pantone", "pantones",
   "papel_acabado_gramaje", "son_promocionales", "corte", "alzado", "suaje",
@@ -204,7 +204,7 @@ function mapClickUpToCot(raw) {
     cantidad:              toStr(raw.cantidad || raw.cantidad_pz)         || "",
     tipo_producto:         toStr(raw.tipo_producto || raw.producto)       || "",
     prioridad:             toStr(raw.prioridad)                           || base.prioridad,
-    detalles:              toStr(raw.detalles || raw.observaciones)       || "",
+    detalles:              "",   // ya no se usa: el texto va a comentarios_empaque
     descripcion_proyecto:  toStr(raw.descripcion_proyecto || raw.description) || "",
     visto_bueno:           toBool(raw.visto_bueno),
     // ── Especificaciones técnicas ──────────────────────────────────────────
@@ -219,7 +219,9 @@ function mapClickUpToCot(raw) {
     son_promocionales:     toBool(raw.son_promocionales || raw.promocionales),
     // ── Empaque ────────────────────────────────────────────────────────────
     tipo_empaque_envio:    toStr(raw.tipo_empaque_envio || raw.empaque_envio || raw.tipo_empaque) || "",
-    comentarios_empaque:   toStr(raw.comentarios_empaque)                || "",
+    // Las "👀 Observaciones & Comentarios" de ClickUp son instrucciones de empaque
+    // (ej. "paquetes de 1,000 piezas"), así que aterrizan en la sección de Empaque.
+    comentarios_empaque:   toStr(raw.comentarios_empaque || raw.detalles || raw.observaciones) || "",
     direccion:             toStr(raw.direccion)                          || base.direccion,
     // ── Acabados ───────────────────────────────────────────────────────────
     acabados: {
@@ -2059,6 +2061,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const [flete, setFlete] = useState("");
   const [cargoUrgenciaPct, setCargoUrgenciaPct] = useState("");
   const [precioRealProveedor, setPrecioRealProveedor] = useState("");
+  // Precio real que cotizó cada proveedor, línea por línea del desglose.
+  // Se guarda por label ("Papel · Couché 150", "Impresión · …") para que cada
+  // servicio tenga su propia comparación contra lo calculado.
+  const [realesPorLinea, setRealesPorLinea] = useState({});
   const [extras, setExtras] = useState("");
   const [margen, setMargen] = useState("35");
 
@@ -2831,32 +2837,92 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
 
       <div style={{ ...cardStyle, marginBottom: 12 }}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 4 }}>
-          📊 Comparar contra lo que el proveedor cotizó de verdad
+          📊 Comparar contra lo que cotizaron de verdad
         </div>
-        <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
-          Cuando te responda por correo con su precio real, cáptalo aquí — así ves si tu tabla de precios sigue vigente o si el proveedor ya ajustó, y queda guardado en el historial para ver la tendencia con el tiempo.
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
+          Conforme te respondan, captura el precio real de cada servicio — así ves exactamente
+          dónde se movió el costo (papel, impresión, acabados) y no sólo el total.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px", alignItems: "end" }}>
-          <div>
-            <label style={labelStyle}>Precio real cotizado por el proveedor ($)</label>
-            <input type="number" value={precioRealProveedor} onChange={e => setPrecioRealProveedor(e.target.value)}
-              placeholder="Ej: 37,100" style={inputStyle} />
+
+        {desgloseArr.length === 0 ? (
+          <div style={{ fontSize: 12, color: C.muted }}>
+            Primero elige proveedores y servicios arriba para poder comparar.
           </div>
-          {parseFloat(precioRealProveedor) > 0 && costoTotal > 0 && (() => {
-            const real = parseFloat(precioRealProveedor);
-            const diff = real - costoTotal;
-            const pctDiff = (diff / costoTotal) * 100;
-            const subio = diff > 0;
-            return (
-              <div style={{ background: subio ? "#FFF3E0" : "#F0FFF4", border: `1.5px solid ${subio ? C.amber : C.green}`, borderRadius: 8, padding: "8px 12px" }}>
-                <div style={{ fontSize: 11, color: C.muted }}>Vs. tu costo calculado ({money(costoTotal)})</div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: subio ? C.coral : C.green }}>
-                  {subio ? "▲" : "▼"} {money(Math.abs(diff))} ({subio ? "+" : ""}{pctDiff.toFixed(1)}%)
+        ) : (
+          <>
+            {/* Encabezados */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 110px 90px", gap: 8,
+              fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase",
+              letterSpacing: "0.06em", paddingBottom: 6, borderBottom: `1.5px solid ${C.border}` }}>
+              <span>Servicio / Proveedor</span>
+              <span style={{ textAlign: "right" }}>Calculado</span>
+              <span style={{ textAlign: "right" }}>Real</span>
+              <span style={{ textAlign: "right" }}>Dif.</span>
+            </div>
+
+            {/* Una fila por servicio */}
+            {desgloseArr.map((r, i) => {
+              const real = parseFloat(realesPorLinea[r.label]) || 0;
+              const diff = real > 0 ? real - r.v : 0;
+              const pct  = real > 0 && r.v > 0 ? (diff / r.v) * 100 : 0;
+              return (
+                <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 90px 110px 90px", gap: 8,
+                  alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 12, color: C.text, lineHeight: 1.3 }}>
+                    {r.label}
+                    {r.prov && <div style={{ fontSize: 10.5, color: C.muted }}>{r.prov}</div>}
+                  </div>
+                  <div style={{ textAlign: "right", fontSize: 12, color: C.muted }}>{money(r.v)}</div>
+                  <input
+                    type="number"
+                    value={realesPorLinea[r.label] || ""}
+                    onChange={e => setRealesPorLinea(prev => ({ ...prev, [r.label]: e.target.value }))}
+                    placeholder="—"
+                    style={{ ...inputStyle, padding: "5px 8px", fontSize: 12, textAlign: "right" }}
+                  />
+                  <div style={{ textAlign: "right", fontSize: 11.5, fontWeight: 700,
+                    color: real === 0 ? C.border : diff > 0 ? C.coral : C.green }}>
+                    {real === 0 ? "—" : (diff > 0 ? "▲" : "▼") + " " + Math.abs(pct).toFixed(0) + "%"}
+                  </div>
                 </div>
-              </div>
-            );
-          })()}
-        </div>
+              );
+            })}
+
+            {/* Total */}
+            {(() => {
+              const totalReal = desgloseArr.reduce((acc, r) => acc + (parseFloat(realesPorLinea[r.label]) || 0), 0);
+              const capturadas = desgloseArr.filter(r => parseFloat(realesPorLinea[r.label]) > 0).length;
+              if (capturadas === 0) return null;
+              const parcial = capturadas < desgloseArr.length;
+              const diff = totalReal - costoTotal;
+              const pct = costoTotal > 0 ? (diff / costoTotal) * 100 : 0;
+              const subio = diff > 0;
+              return (
+                <div style={{ marginTop: 12, background: subio ? "#FFF3E0" : "#F0FFF4",
+                  border: `1.5px solid ${subio ? C.amber : C.green}`, borderRadius: 8, padding: "10px 14px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: C.muted }}>
+                        Total real {parcial && <>de {capturadas} de {desgloseArr.length} servicios</>} vs. calculado ({money(costoTotal)})
+                      </div>
+                      <div style={{ fontWeight: 700, fontSize: 15, color: C.navy }}>{money(totalReal)}</div>
+                    </div>
+                    {!parcial && (
+                      <div style={{ fontWeight: 700, fontSize: 14, color: subio ? C.coral : C.green }}>
+                        {subio ? "▲" : "▼"} {money(Math.abs(diff))} ({subio ? "+" : ""}{pct.toFixed(1)}%)
+                      </div>
+                    )}
+                  </div>
+                  {parcial && (
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+                      Faltan {desgloseArr.length - capturadas} por capturar — la diferencia total se calcula cuando estén todos.
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 8 }}>
@@ -2873,9 +2939,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
             fecha: new Date().toISOString(),
             tipo: "cotizacion",
             qty, pliegos,
-            desglose: desgloseArr.map(r => ({ label: r.label, prov: r.prov, monto: r.v })),
+            desglose: desgloseArr.map(r => ({ label: r.label, prov: r.prov, monto: r.v,
+              real: parseFloat(realesPorLinea[r.label]) || null })),
             costoTotal, margenPct: parseFloat(margen) || 0, precioVenta, utilidad,
-            precioRealProveedor: parseFloat(precioRealProveedor) || null,
+            precioRealProveedor: desgloseArr.reduce((a, r) => a + (parseFloat(realesPorLinea[r.label]) || 0), 0) || null,
           });
           setGuardadoPrecio(true);
           setTimeout(() => setGuardadoPrecio(false), 2000);
@@ -2980,9 +3047,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
               fecha: new Date().toISOString(),
               tipo: "pedido_confirmado",
               qty, pliegos,
-              desglose: desgloseArr.map(r => ({ label: r.label, prov: r.prov, monto: r.v })),
+              desglose: desgloseArr.map(r => ({ label: r.label, prov: r.prov, monto: r.v,
+                real: parseFloat(realesPorLinea[r.label]) || null })),
               costoTotal, margenPct: parseFloat(margen) || 0, precioVenta, utilidad,
-              precioRealProveedor: parseFloat(precioRealProveedor) || null,
+              precioRealProveedor: desgloseArr.reduce((a, r) => a + (parseFloat(realesPorLinea[r.label]) || 0), 0) || null,
               proveedoresUsados,
             });
             setGuardadoCronograma(true);
@@ -3241,7 +3309,14 @@ function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
                         {(h.desglose || []).map((d, i) => (
                           <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted }}>
                             <span>{d.label}{d.prov && " · " + d.prov}</span>
-                            <span>{money(d.monto)}</span>
+                            <span>
+                              {money(d.monto)}
+                              {d.real > 0 && (
+                                <span style={{ color: d.real > d.monto ? C.coral : C.green, fontWeight: 700, marginLeft: 6 }}>
+                                  → real {money(d.real)}
+                                </span>
+                              )}
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -4786,13 +4861,6 @@ function SolicitudCotizacion({ onGuardar }) {
             <Field label="Descripción del proyecto">
               <textarea value={cot.descripcion_proyecto} onChange={e => set("descripcion_proyecto", e.target.value)}
                 placeholder="qué es el proyecto — viene de la descripción de la tarea en ClickUp"
-                style={{ ...inputStyle, height: 80, resize: "vertical" }} />
-            </Field>
-          </div>
-          <div style={{ gridColumn: "1 / -1" }}>
-            <Field label="Detalles y observaciones de la cotización" required>
-              <textarea value={cot.detalles} onChange={e => set("detalles", e.target.value)}
-                placeholder="instrucciones especiales: empacar en paquetes de 1,000 pzas, entregar en dos remesas, etc."
                 style={{ ...inputStyle, height: 80, resize: "vertical" }} />
             </Field>
           </div>
