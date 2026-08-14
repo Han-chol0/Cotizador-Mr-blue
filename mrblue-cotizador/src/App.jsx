@@ -117,6 +117,7 @@ function mapClickUpToCot(raw) {
     tipo_producto:         toStr(raw.tipo_producto || raw.producto)       || "",
     prioridad:             toStr(raw.prioridad)                           || base.prioridad,
     detalles:              toStr(raw.detalles || raw.observaciones)       || "",
+    visto_bueno:           toBool(raw.visto_bueno),
     // ── Especificaciones técnicas ──────────────────────────────────────────
     papel_acabado_gramaje: toStr(raw.papel_acabado_gramaje || raw.papel || raw.papel_gramaje) || "",
     tamano_extendido:      toStr(raw.tamano_extendido || raw.size_extendido) || "",
@@ -151,7 +152,7 @@ function mapClickUpToCot(raw) {
     laminado:          toBool(raw.laminado),
     tipo_laminado:     toStr(raw.tipo_laminado)     || "",
     caras_laminado:    toStr(raw.caras_laminado)    || "",
-    barniz_uv:         toBool(raw.barniz_uv),
+    barniz_uv:         toBool(raw.barniz_uv) || !!toStr(raw.tipo_barniz),
     tipo_barniz:       toStr(raw.tipo_barniz)       || "",
     hotstamping_color: toStr(raw.hotstamping_color) || "",
     // ── Meta ───────────────────────────────────────────────────────────────
@@ -4262,17 +4263,17 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
 
 const PRIORIDADES = ["Normal", "Urgente", "Muy urgente", "Para ayer 🔥"];
 const TIPOS_PRODUCTO = [
-  "Impreso offset", "Folleto", "Catálogo", "Revista", "Libro",
+  "Impreso Offset", "Folleto", "Catálogo", "Revista", "Libro",
   "Caja plegadiza", "Empaque", "Etiqueta", "Tarjeta", "Poster/Banner",
   "Promocional", "Otro",
 ];
 const TIPO_EMPAQUE_ENVIO = [
-  "Caja individual", "Caja master", "Bolsa", "Film stretch",
-  "Pallet", "Sin empaque especial", "Otro",
+  "Paquete", "Kraft", "Caja", "Papel Burbuja", "Playo", "Esquinas carton",
 ];
-const TIPO_LAMINADO = ["Mate", "Brillante", "Soft touch", "Anti-scratch"];
-const CARAS_LAMINADO = ["1 cara", "2 caras"];
-const TIPO_BARNIZ = ["A Plasta", "A Registro", "Drip-off"];
+const TIPO_LAMINADO = ["Brillante", "Mate", "Soft Touch", "Sin Laminado"];
+const CARAS_LAMINADO = ["Laminado Frente", "Laminado Vuelta", "Ambas caras"];
+const TIPO_BARNIZ = ["U.V. Plasta", "U.V. Registro", "Barniz Maquina", "Barniz texturizado"];
+
 
 const CONTACTOS_MRB = [
   { nombre: "Remedios Flores", correo: "remedios@mrblue.com.mx" },
