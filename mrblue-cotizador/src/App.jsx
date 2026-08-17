@@ -174,6 +174,32 @@ async function logMovimiento(cotizacionId, accion, detalle) {
   } catch (e) { console.error("No se pudo escribir en la bitácora:", e); }
 }
 
+// ─── Guardar los pliegos calculados de vuelta en Supabase ───────────────────
+// La orden de maquila (Make → Google Sheets) necesita pliegos de producción,
+// merma y totales. Ese cálculo depende de la imposición, que sólo el Cotizador
+// conoce — así que aquí se escriben, y Make los lee por task_id cuando la tarea
+// llega a la lista de Pedidos (conserva el mismo ID al moverse).
+async function guardarPliegosEnSupabase(supabaseId, calcData) {
+  if (!supabaseId || !calcData?.selectedSheet?.piecesPerSheet) return;
+  const piezasPorPliego = calcData.selectedSheet.piecesPerSheet;
+  const mermaPct    = parseFloat(calcData.merma) || 0;
+  const produccion  = Math.ceil(calcData.qty / piezasPorPliego);
+  const totales     = Math.ceil(produccion * (1 + mermaPct / 100));
+  const merma       = totales - produccion;
+  const { error } = await supabase
+    .from("solicitudes_cotizador")
+    .update({
+      pliegos_produccion: produccion,
+      pliegos_merma:      merma,
+      pliegos_totales:    totales,
+      merma_pct:          mermaPct,
+      medida_pliego:      calcData.selectedSheet.label || null,
+      updated_at:         new Date().toISOString(),
+    })
+    .eq("id", supabaseId);
+  if (error) console.error("No se pudieron guardar los pliegos:", error);
+}
+
 // ─── Traer la solicitud desde Supabase usando el cot_id de la URL ────────────
 async function fetchCotFromSupabase(cotId) {
   const { data, error } = await supabase
@@ -5579,6 +5605,14 @@ export default function App() {
   };
 
   const elegirUsuario = (u) => { setUsuarioLS(u); setUsuario(u); };
+
+  // Cada vez que cambia el cálculo de pliegos, se guarda en Supabase para que
+  // la orden de maquila lo tenga sin capturarlo a mano.
+  useEffect(() => {
+    if (cotizacion?._supabase_id && calcData?.selectedSheet) {
+      guardarPliegosEnSupabase(cotizacion._supabase_id, calcData);
+    }
+  }, [calcData, cotizacion?._supabase_id]);
 
   if (!usuario) return <SelectorUsuario onElegir={elegirUsuario} />;
 
