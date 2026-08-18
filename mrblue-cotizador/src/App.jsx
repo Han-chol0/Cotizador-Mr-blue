@@ -426,6 +426,9 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
               <Stat label="Papel por pieza" value={"$" + papelInfo.costoPorPieza.toLocaleString("es-MX", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} />
               <div style={{ gridColumn: "1 / -1", fontSize: 10.5, color: C.muted }}>
                 Mejor precio: <b style={{ color: C.text }}>{papelInfo.provNombre}</b>
+                {papelInfo.gramaje ? ` · ${papelInfo.gramaje} g/m²` : ""}
+                {papelInfo.puntos ? ` · ${papelInfo.puntos} pts` : ""}
+                {papelInfo.caras ? ` · ${papelInfo.caras} cara${papelInfo.caras === "2" || papelInfo.caras === 2 ? "s" : ""}` : ""}
               </div>
             </div>
           )}
@@ -500,7 +503,7 @@ function colorForCategoria(categorias, cat) {
   return idx >= 0 ? PALETA_CATEGORIAS[idx % PALETA_CATEGORIAS.length] : C.muted;
 }
 
-const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "", ancho: "", alto: "", gramaje: "", puntos: "" });
+const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "", ancho: "", alto: "", gramaje: "", puntos: "", caras: "" });
 
 // Medidas de pliego más comunes en el mercado mexicano, para el datalist de "Tamaño".
 const TAMANOS_PAPEL_COMUNES = ["90x75", "70x100", "65x90", "60x90", "76x112", "70x95", "63.5x88"];
@@ -569,7 +572,7 @@ function costoServicioPorCantidad(unidad_precio, precio, qty, areaM2PorUnidad) {
 // Compara dos listas de escalones ignorando el campo `id` (que solo existe en los ya guardados).
 function escalonesIguales(a, b) {
   const norm = arr => (arr || [])
-    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}|${e.ancho ?? ""}|${e.alto ?? ""}|${e.gramaje ?? ""}|${e.puntos ?? ""}`)
+    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}|${e.ancho ?? ""}|${e.alto ?? ""}|${e.gramaje ?? ""}|${e.puntos ?? ""}|${e.caras ?? ""}`)
     .sort();
   const na = norm(a), nb = norm(b);
   return na.length === nb.length && na.every((v, i) => v === nb[i]);
@@ -926,7 +929,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
         const d = precios[claveActiva] || { escalones: [nuevoEscalon()], historial: [] };
         const esFijo = s.unidad_precio === "fijo";
         const esPapel = s.categoria === "papel";
-        const colsEscalon = esPapel ? "95px 62px 55px 1fr 60px 32px" : "80px 80px 1fr 70px 32px";
+        const colsEscalon = esPapel ? "88px 56px 50px 62px 1fr 55px 32px" : "80px 80px 1fr 70px 32px";
 
         return (
           <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
@@ -969,7 +972,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
                 padding: "0 12px 4px", fontSize: 10, fontWeight: 700, color: C.muted,
                 textTransform: "uppercase", letterSpacing: "0.06em" }}>
                 {esPapel
-                  ? <><div>Tamaño</div><div>Grs/m²</div><div>Puntos</div></>
+                  ? <><div>Tamaño</div><div>Grs/m²</div><div>Puntos</div><div>Caras</div></>
                   : <><div>Desde</div><div>Hasta</div></>}
                 <div>{unidadLabel[s.unidad_precio] || "$"}</div><div>Horas</div><div />
               </div>
@@ -1009,6 +1012,13 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
                   <input value={e.puntos} onChange={ev => updateEscalon(claveActiva, idx, "puntos", ev.target.value)}
                     type="number" step="1" placeholder="—" title="Puntos de grosor (solo cartulinas)"
                     style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                  <select value={e.caras} onChange={ev => updateEscalon(claveActiva, idx, "caras", ev.target.value)}
+                    title="Caras recubiertas del papel (ej. couché 2 caras, sulfatada 1 cara)"
+                    style={{ ...inputStyle, fontSize: 12, padding: "6px 4px", appearance: "none" }}>
+                    <option value="">—</option>
+                    <option value="1">1 cara</option>
+                    <option value="2">2 caras</option>
+                  </select>
                 </>}
                 <div style={{ position: "relative" }}>
                   <span style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: C.muted }}>$</span>
@@ -1072,7 +1082,7 @@ async function loadProveedoresDB() {
   const { data: maqs } = await supabase.from("maquinas").select("*");
   const { data: tarifas } = await supabase
     .from("tarifas")
-    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at, ancho, alto, gramaje, puntos")
+    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at, ancho, alto, gramaje, puntos, caras")
     .order("tiraje_min", { ascending: true, nullsFirst: true });
 
   return (provs || []).map(p => {
@@ -1102,7 +1112,7 @@ async function loadProveedoresDB() {
         precios[clave].escalones.push({
           id: t.id, tiraje_min: t.tiraje_min ?? "", tiraje_max: t.tiraje_max ?? "",
           precio: t.precio, tiempo_horas: t.tiempo_horas ?? "", notas: t.notas_precio || "",
-          ancho: t.ancho ?? "", alto: t.alto ?? "", gramaje: t.gramaje ?? "", puntos: t.puntos ?? "",
+          ancho: t.ancho ?? "", alto: t.alto ?? "", gramaje: t.gramaje ?? "", puntos: t.puntos ?? "", caras: t.caras != null ? String(t.caras) : "",
         });
       }
     });
@@ -1284,6 +1294,7 @@ async function savePreciosDB(provId, precios, previos) {
         alto: e.alto === "" || e.alto == null ? null : parseFloat(e.alto),
         gramaje: e.gramaje === "" || e.gramaje == null ? null : parseFloat(e.gramaje),
         puntos: e.puntos === "" || e.puntos == null ? null : parseFloat(e.puntos),
+        caras: e.caras === "" || e.caras == null ? null : parseInt(e.caras),
         activo: true,
       }));
       const { error: eIns } = await supabase.from("tarifas").insert(rows);
@@ -1840,7 +1851,7 @@ function AdminProveedores() {
                   style={{ ...btn(expanded[prov.id] === "precios" ? C.cyan : C.bg),
                     color: expanded[prov.id] === "precios" ? "#fff" : C.muted,
                     border: `1.5px solid ${expanded[prov.id] === "precios" ? C.cyan : C.border}` }}>
-                  💰 Precios
+                  💰 {esPapelero ? "Precio papel" : "Precios"}
                 </button>
                 <button onClick={() => toggleSection(prov.id, "archivos")}
                   style={{ ...btn(expanded[prov.id] === "archivos" ? C.amber : C.bg),
@@ -2036,7 +2047,8 @@ function Calculadora({ onCalcDone, cotizacion }) {
           const w = parseFloat(e.ancho), h = parseFloat(e.alto), precio = parseFloat(e.precio);
           if (!(w > 0 && h > 0 && precio > 0)) return;
           out.push({ w, h, precio, provNombre: p.nombre, provId: p.id,
-            tiraje_min: e.tiraje_min, tiraje_max: e.tiraje_max });
+            tiraje_min: e.tiraje_min, tiraje_max: e.tiraje_max,
+            gramaje: e.gramaje, puntos: e.puntos, caras: e.caras });
         });
       });
     });
