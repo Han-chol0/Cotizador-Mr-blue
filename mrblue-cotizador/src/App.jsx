@@ -667,13 +667,21 @@ function fmtP(n) {
 // así que agregar o quitar servicios ahí se refleja aquí sin tocar código.
 // soloCats / excluirCats permiten partir la ficha en varias pestañas
 // (ej. papeleros: "Precios" muestra papeles, "Sustratos" muestra imán/rígidos).
-function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
+function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefault }) {
   // precios: { [servicio_id]: { escalones: [{id, tiraje_min, tiraje_max, precio, notas}], historial: [...] } }
   const [catalogo, setCatalogo] = useState([]);
   const [loadingCat, setLoadingCat] = useState(true);
   const [precios, setPrecios] = useState({});
   const [saved, setSaved] = useState(false);
   const [maquinaSelPorServicio, setMaquinaSelPorServicio] = useState({}); // { [servicioId]: maquinaId | null(=General) }
+  // Cambios pendientes de guardar. Sin esto, borrar un escalón parecía surtir
+  // efecto (la tarjeta desaparecía) pero al salir todo volvía, porque nunca se
+  // llegó a mandar a Supabase.
+  const [sucio, setSucio] = useState(false);
+  // Servicios que deben seguir visibles aunque se queden sin escalones, para
+  // poder darle "Guardar" después de borrar el último precio.
+  const [idsVisibles, setIdsVisibles] = useState(() => new Set());
+  const [errorGuardado, setErrorGuardado] = useState("");
 
   // ── Formulario "+ Agregar proceso" (nombre, categoría, unidad, precio, horas) ──
   const [mostrandoForm, setMostrandoForm] = useState(false);
@@ -711,38 +719,82 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
         }
       });
       setPrecios(base);
+      // Los que ya traían precio se quedan visibles aunque los vacíes.
+      const visibles = new Set();
+      cat.forEach(s => {
+        const conPrecio = Object.keys(base).some(k =>
+          (k === s.id || k.startsWith(s.id + "__m__")) &&
+          (base[k].escalones || []).some(e => parseFloat(e.precio) > 0));
+        if (conPrecio) visibles.add(s.id);
+      });
+      setIdsVisibles(visibles);
+      setSucio(false);
       const categorias = [...new Set(cat.map(s => s.categoria))];
-      setFormCategoria(categorias[0] || "__nueva__");
+      // En una pestaña filtrada (papel / sustratos) el default debe caer dentro
+      // del filtro, si no el proceso nuevo nace en la categoría equivocada y
+      // pierde sus campos propios (Tamaño, Grs/m², Caras…).
+      setFormCategoria(catDefault || soloCats?.[0] || categorias[0] || "__nueva__");
       setLoadingCat(false);
     });
     return () => { vivo = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prov.id]);
 
-  const updateEscalon = (sid, idx, field, val) =>
+  const updateEscalon = (sid, idx, field, val) => {
+    setSucio(true);
     setPrecios(prev => {
       const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
       return { ...prev, [sid]: { ...base, escalones: base.escalones.map((e, i) => i === idx ? { ...e, [field]: val } : e) } };
     });
+  };
   // Igual que updateEscalon pero para varios campos a la vez (ej. Tamaño → ancho + alto juntos).
-  const updateEscalonMulti = (sid, idx, campos) =>
+  const updateEscalonMulti = (sid, idx, campos) => {
+    setSucio(true);
     setPrecios(prev => {
       const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
       return { ...prev, [sid]: { ...base, escalones: base.escalones.map((e, i) => i === idx ? { ...e, ...campos } : e) } };
     });
-  const addEscalon = (sid) =>
+  };
+  const addEscalon = (sid) => {
+    setSucio(true);
     setPrecios(prev => {
       const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
       return { ...prev, [sid]: { ...base, escalones: [...base.escalones, nuevoEscalon()] } };
     });
-  const removeEscalon = (sid, idx) =>
+  };
+  const removeEscalon = (sid, idx) => {
+    setSucio(true);
     setPrecios(prev => {
       const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
       return { ...prev, [sid]: { ...base, escalones: base.escalones.filter((_, i) => i !== idx) } };
     });
+  };
 
-  const guardar = () => {
-    onSave({ ...prov, precios });
+  // Quita un proceso completo de este proveedor (todos sus escalones, en todas
+  // sus máquinas) y lo manda a Supabase de inmediato — no espera a "Guardar
+  // precios", porque borrar y que reaparezca al salir era muy confuso.
+  const removeProceso = async (sid, nombre) => {
+    if (!window.confirm(`¿Quitar "${nombre}" de este proveedor?\n\nSe borran todos sus precios capturados. El historial se conserva.`)) return;
+    const siguiente = { ...precios };
+    Object.keys(siguiente).forEach(k => {
+      if (k === sid || k.startsWith(sid + "__m__")) {
+        siguiente[k] = { ...siguiente[k], escalones: [] };
+      }
+    });
+    setPrecios(siguiente);
+    setIdsVisibles(prev => { const s = new Set(prev); s.delete(sid); return s; });
+    setSucio(false);
+    setErrorGuardado("");
+    const errs = await onSave({ ...prov, precios: siguiente });
+    if (errs && errs.length) setErrorGuardado(errs.join(" · "));
+    else { setSaved(true); setTimeout(() => setSaved(false), 2000); }
+  };
+
+  const guardar = async () => {
+    setErrorGuardado("");
+    const errs = await onSave({ ...prov, precios });
+    if (errs && errs.length) { setErrorGuardado(errs.join(" · ")); return; }
+    setSucio(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -809,6 +861,8 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
       const nuevoEsc = { ...nuevoEscalon(), precio: formPrecio, tiempo_horas: formHoras, notas: formNotas };
       return { ...prev, [servicio.id]: { escalones: [nuevoEsc, ...actuales], historial: prev[servicio.id]?.historial || [] } };
     });
+    setIdsVisibles(prev => new Set(prev).add(servicio.id));
+    setSucio(true);
 
     setFormNombre(""); setFormCategoriaNueva(""); setFormPrecio(""); setFormHoras(""); setFormNotas("");
     setMostrandoForm(false);
@@ -823,7 +877,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
   const enFiltro = (s) =>
     (!soloCats || soloCats.includes(s.categoria)) &&
     (!excluirCats || !excluirCats.includes(s.categoria));
-  const procesosProveedor = catalogo.filter(s => tieneAlgunPrecio(s) && enFiltro(s));
+  const procesosProveedor = catalogo.filter(s => (tieneAlgunPrecio(s) || idsVisibles.has(s.id)) && enFiltro(s));
   const hayImpresionVisible = procesosProveedor.some(s => s.categoria === "impresion");
 
   return (
@@ -863,7 +917,9 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
               <div>
                 <label style={labelStyle}>Categoría</label>
                 <select value={formCategoria} onChange={e => setFormCategoria(e.target.value)} style={{ ...inputStyle, appearance: "none" }}>
-                  {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                  {categorias
+                    .filter(cat => (!soloCats || soloCats.includes(cat)) && (!excluirCats || !excluirCats.includes(cat)))
+                    .map(cat => <option key={cat} value={cat}>{cat}</option>)}
                   <option value="__nueva__">+ Nueva categoría…</option>
                 </select>
                 {formCategoria === "__nueva__" && (
@@ -933,10 +989,18 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
 
         return (
           <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
-            <div style={{ padding: "9px 12px 4px", fontWeight: 700, fontSize: 13, color: C.text }}>
-              {s.nombre}
-              <span style={{ fontSize: 10, fontWeight: 700, color: C.muted, marginLeft: 8, textTransform: "capitalize" }}>{s.categoria}</span>
-              {esFijo && <span style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginLeft: 6 }}>(costo único por proyecto)</span>}
+            <div style={{ padding: "9px 12px 4px", fontWeight: 700, fontSize: 13, color: C.text, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1 }}>
+                {s.nombre}
+                <span style={{ fontSize: 10, fontWeight: 700, color: C.muted, marginLeft: 8, textTransform: "capitalize" }}>{s.categoria}</span>
+                {esFijo && <span style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginLeft: 6 }}>(costo único por proyecto)</span>}
+              </span>
+              <button onClick={() => removeProceso(s.id, s.nombre)}
+                title="Quitar este proceso de este proveedor (borra sus precios)"
+                style={{ border: `1px solid ${C.red}`, color: C.red, background: "none", borderRadius: 7,
+                  cursor: "pointer", fontSize: 10.5, fontWeight: 700, padding: "3px 9px", whiteSpace: "nowrap" }}>
+                🗑 Quitar
+              </button>
             </div>
 
             {prov.maquinas && prov.maquinas.length > 1 && (
@@ -1060,8 +1124,20 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
         );
       })}
 
-      <button onClick={guardar} style={{ ...btn(saved ? C.green : C.cyan), marginTop: 8 }}>
-        {saved ? "✓ Precios guardados" : "Guardar precios"}
+      {errorGuardado && (
+        <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 12px", fontSize: 12, color: C.red, marginTop: 10 }}>
+          ⚠ {errorGuardado}
+        </div>
+      )}
+
+      {sucio && (
+        <div style={{ background: "#FFF3CD", border: `1.5px solid ${C.amber}`, borderRadius: 8, padding: "8px 12px", fontSize: 12, color: C.text, marginTop: 10 }}>
+          ⚠ Tienes cambios sin guardar — nada se manda a la base hasta que le des <b>Guardar precios</b>.
+        </div>
+      )}
+
+      <button onClick={guardar} style={{ ...btn(saved ? C.green : sucio ? C.amber : C.cyan), marginTop: 8 }}>
+        {saved ? "✓ Precios guardados" : sucio ? "Guardar precios ⚠" : "Guardar precios"}
       </button>
     </div>
   );
@@ -1269,6 +1345,7 @@ function parseCsvPrecios(text) {
 // set nuevo completo con activo=true. Si un servicio se quitó por completo de la
 // ficha, sus escalones anteriores también se desactivan.
 async function savePreciosDB(provId, precios, previos) {
+  const errores = [];
   const todasLasLlaves = new Set([...Object.keys(precios || {}), ...Object.keys(previos || {})]);
   for (const clave of todasLasLlaves) {
     const nuevos = (precios?.[clave]?.escalones || []).filter(e => e.precio !== "" && e.precio != null);
@@ -1277,8 +1354,14 @@ async function savePreciosDB(provId, precios, previos) {
 
     const idsAnteriores = anteriores.map(e => e.id).filter(Boolean);
     if (idsAnteriores.length) {
-      const { error: eOff } = await supabase.from("tarifas").update({ activo: false }).in("id", idsAnteriores);
-      if (eOff) console.error(eOff);
+      // Se desactivan en vez de borrarse, para conservar el historial de precios.
+      const { data: off, error: eOff } = await supabase
+        .from("tarifas").update({ activo: false }).in("id", idsAnteriores).select("id");
+      if (eOff) { console.error(eOff); errores.push("No se pudieron dar de baja precios anteriores: " + eOff.message); }
+      // Si no devolvió filas, la política de la tabla bloqueó el update en silencio.
+      else if ((off || []).length !== idsAnteriores.length) {
+        errores.push(`Solo se dieron de baja ${(off || []).length} de ${idsAnteriores.length} precios — revisa los permisos (RLS) de la tabla "tarifas" para UPDATE.`);
+      }
     }
 
     if (nuevos.length) {
@@ -1298,9 +1381,10 @@ async function savePreciosDB(provId, precios, previos) {
         activo: true,
       }));
       const { error: eIns } = await supabase.from("tarifas").insert(rows);
-      if (eIns) console.error(eIns);
+      if (eIns) { console.error(eIns); errores.push("No se pudieron guardar precios nuevos: " + eIns.message); }
     }
   }
+  return errores;
 }
 
 async function registrarPrecioEnFicha(proveedorId, servicioId, precio, qty, fecha) {
@@ -1721,8 +1805,9 @@ function AdminProveedores() {
 
   const savePrecios = async (provActualizado) => {
     const anterior = proveedores.find(p => p.id === provActualizado.id);
-    await savePreciosDB(provActualizado.id, provActualizado.precios, anterior?.precios);
+    const errores = await savePreciosDB(provActualizado.id, provActualizado.precios, anterior?.precios);
     await recargar();
+    return errores;
   };
 
   const toggleSection = (provId, section) =>
@@ -1859,12 +1944,14 @@ function AdminProveedores() {
                     border: `1.5px solid ${expanded[prov.id] === "archivos" ? C.amber : C.border}` }}>
                   📎 Archivos
                 </button>
-                <button onClick={() => toggleSection(prov.id, "entregas")}
-                  style={{ ...btn(expanded[prov.id] === "entregas" ? "#F5A623" : C.bg),
-                    color: expanded[prov.id] === "entregas" ? "#fff" : C.muted,
-                    border: `1.5px solid ${expanded[prov.id] === "entregas" ? "#F5A623" : C.border}` }}>
-                  📊 Entregas
-                </button>
+                {!esPapelero && (
+                  <button onClick={() => toggleSection(prov.id, "entregas")}
+                    style={{ ...btn(expanded[prov.id] === "entregas" ? "#F5A623" : C.bg),
+                      color: expanded[prov.id] === "entregas" ? "#fff" : C.muted,
+                      border: `1.5px solid ${expanded[prov.id] === "entregas" ? "#F5A623" : C.border}` }}>
+                    📊 Entregas
+                  </button>
+                )}
                 <button onClick={() => deleteProveedor(prov.id)}
                   style={{ ...btn(C.red), background: "none", color: C.red, border: `1.5px solid ${C.red}` }}>
                   Eliminar
@@ -1953,14 +2040,14 @@ function AdminProveedores() {
                   🧲 Imán, PVC, acrílico y otros sustratos rígidos. Se cobran <b>por pieza</b> (no por medida de pliego), así que aquí "Desde"/"Hasta" son cantidades de piezas.
                 </div>
                 <FichaPrecios prov={prov} onSave={savePrecios}
-                  soloCats={CATS_SUSTRATO} etiqueta="sustratos" />
+                  soloCats={CATS_SUSTRATO} catDefault="magnetico" etiqueta="sustratos" />
               </div>
             )}
 
             {/* Sección: Precios por proceso */}
             {expanded[prov.id] === "precios" && (
               esPapelero
-                ? <FichaPrecios prov={prov} onSave={savePrecios} excluirCats={CATS_SUSTRATO} etiqueta="papeles" />
+                ? <FichaPrecios prov={prov} onSave={savePrecios} excluirCats={CATS_SUSTRATO} catDefault="papel" etiqueta="papeles" />
                 : <FichaPrecios prov={prov} onSave={savePrecios} />
             )}
 
@@ -1970,7 +2057,7 @@ function AdminProveedores() {
             )}
 
             {/* Sección: Historial de entregas y calificaciones */}
-            {expanded[prov.id] === "entregas" && (
+            {expanded[prov.id] === "entregas" && !esPapelero && (
               <HistorialEntregas proveedorId={prov.id} />
             )}
           </div>
