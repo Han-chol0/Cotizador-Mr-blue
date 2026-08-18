@@ -816,40 +816,72 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
 
   // ── Importar CSV: llena el primer escalón de cada servicio (sin tiraje), comparando por nombre.
   // Formato esperado: nombre,precio (una fila por servicio). No se guarda hasta darle "Guardar precios".
-  const [importInfo, setImportInfo] = useState(null); // { matched, total }
+  const [importInfo, setImportInfo] = useState(null); // { creados, actualizados, escalones, sinCategoria }
   const onImportCsv = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       const filas = parseCsvPrecios(String(ev.target.result || ""));
-      let matched = 0;
-      const vistos = [];
-      setPrecios(prev => {
-        const next = { ...prev };
-        filas.forEach(({ nombre, precio, ancho, alto, gramaje, puntos, caras }) => {
-          const s = catalogo.find(c => normalizarTexto(c.nombre) === normalizarTexto(nombre));
-          if (!s) return;
-          matched++;
-          vistos.push(s.id);
-          const actuales = next[s.id]?.escalones || [nuevoEscalon()];
-          // Solo pisa los campos que sí venían en el CSV — lo que dejaste vacío
-          // en Excel conserva lo que ya estaba capturado.
-          const primero = { ...actuales[0], precio };
-          if (ancho && alto) { primero.ancho = ancho; primero.alto = alto; }
-          if (gramaje) primero.gramaje = gramaje;
-          if (puntos)  primero.puntos  = puntos;
-          if (caras)   primero.caras   = caras;
-          next[s.id] = { escalones: [primero, ...actuales.slice(1)], historial: next[s.id]?.historial || [] };
-        });
-        return next;
+      if (!filas.length) { setImportInfo({ vacio: true }); setTimeout(() => setImportInfo(null), 6000); return; }
+
+      // Un mismo papel suele venir en varios renglones (una medida/gramaje por
+      // renglón), así que se agrupan por nombre y cada renglón se vuelve un escalón.
+      const grupos = new Map();
+      filas.forEach(f => {
+        const k = normalizarTexto(f.nombre);
+        if (!grupos.has(k)) grupos.set(k, { nombre: f.nombre, filas: [] });
+        grupos.get(k).filas.push(f);
       });
-      if (vistos.length) {
-        setIdsVisibles(prev => { const s = new Set(prev); vistos.forEach(id => s.add(id)); return s; });
+
+      const categoriaNueva = catDefault || soloCats?.[0] || null;
+      const pisaExistentes = [...grupos.keys()].some(k => {
+        const s = catalogo.find(c => normalizarTexto(c.nombre) === k);
+        return s && (precios[s.id]?.escalones || []).some(x => parseFloat(x.precio) > 0);
+      });
+      if (pisaExistentes && !window.confirm(
+        "Algunos de estos procesos ya tienen precios capturados.\n\n" +
+        "Al importar se REEMPLAZAN sus renglones por los del CSV (los anteriores quedan en el historial).\n\n¿Continuar?"
+      )) { e.target.value = ""; return; }
+
+      let creados = 0, actualizados = 0, sinCategoria = 0, escalones = 0;
+      const nuevosCat = [];
+      const nextPrecios = { ...precios };
+      const visibles = [];
+
+      for (const g of grupos.values()) {
+        let s = catalogo.find(c => normalizarTexto(c.nombre) === normalizarTexto(g.nombre))
+             || nuevosCat.find(c => normalizarTexto(c.nombre) === normalizarTexto(g.nombre));
+        if (!s) {
+          if (!categoriaNueva) { sinCategoria++; continue; }
+          s = await crearServicioCatalogo({ nombre: g.nombre, categoria: categoriaNueva, unidad_precio: formUnidad });
+          if (!s) { sinCategoria++; continue; }
+          nuevosCat.push(s);
+          creados++;
+        } else actualizados++;
+
+        nextPrecios[s.id] = {
+          escalones: g.filas.map(f => ({
+            ...nuevoEscalon(), precio: f.precio,
+            ancho: f.ancho, alto: f.alto, gramaje: f.gramaje, puntos: f.puntos, caras: f.caras,
+          })),
+          historial: nextPrecios[s.id]?.historial || [],
+        };
+        escalones += g.filas.length;
+        visibles.push(s.id);
+      }
+
+      if (nuevosCat.length) {
+        setCatalogo(prev => [...prev, ...nuevosCat].sort((a, b) =>
+          a.categoria === b.categoria ? a.nombre.localeCompare(b.nombre) : a.categoria.localeCompare(b.categoria)));
+      }
+      setPrecios(nextPrecios);
+      if (visibles.length) {
+        setIdsVisibles(prev => { const s = new Set(prev); visibles.forEach(id => s.add(id)); return s; });
         setSucio(true);
       }
-      setImportInfo({ matched, total: filas.length });
-      setTimeout(() => setImportInfo(null), 6000);
+      setImportInfo({ creados, actualizados, escalones, sinCategoria, total: filas.length });
+      setTimeout(() => setImportInfo(null), 12000);
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -943,14 +975,19 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
           <input type="file" accept=".csv" onChange={onImportCsv} style={{ display: "none" }} />
         </label>
         {importInfo && (
-          <span style={{ fontSize: 11, color: importInfo.matched > 0 ? C.green : C.red, fontWeight: 700 }}>
-            {importInfo.matched} de {importInfo.total} filas coincidieron con el catálogo{importInfo.matched < importInfo.total ? " (revisa nombres exactos para las demás)" : ""}
+          <span style={{ fontSize: 11, fontWeight: 700, color: importInfo.vacio || importInfo.sinCategoria ? C.red : C.green }}>
+            {importInfo.vacio
+              ? "No se leyó ninguna fila válida — revisa que tenga al menos nombre y precio."
+              : `${importInfo.escalones} renglones cargados · ${importInfo.creados} proceso${importInfo.creados === 1 ? "" : "s"} nuevo${importInfo.creados === 1 ? "" : "s"} · ${importInfo.actualizados} actualizado${importInfo.actualizados === 1 ? "" : "s"}` +
+                (importInfo.sinCategoria ? ` · ${importInfo.sinCategoria} sin poder crear` : "") +
+                " — falta darle Guardar precios"}
           </span>
         )}
       </div>
       <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 12 }}>
-        Columnas: <b>nombre,precio</b> — y para papel puedes agregar <b>tamaño,gramaje,puntos,caras</b> (ej. <code>Couché 2 caras 150,410,90x75,150,,2</code>).
-        Solo aplica a procesos que ya existen en el catálogo; deja vacía cualquier columna que no quieras tocar.
+        Columnas: <b>nombre,precio</b> — y para papel puedes agregar <b>tamaño,gramaje,puntos,caras</b> (ej. <code>Bond blanco,759,57x87,50,,</code>).
+        Repite el mismo nombre en varios renglones para cargar sus distintas medidas y gramajes; cada renglón se vuelve un precio.
+        Si el proceso no existe en el catálogo, se crea{catDefault ? ` en la categoría "${catDefault}"` : ""} con la unidad que tengas elegida arriba.
       </div>
 
       {/* Agregar proceso manualmente (nombre, tiempo y precio) */}
@@ -2438,11 +2475,15 @@ function Calculadora({ onCalcDone, cotizacion }) {
       selectedSheet: { ...best.sheet, ...best.result },
       papelServicioId: papelServicioId || null,
       papelProvId: papelDelSeleccionado?.provId || null,
+      // Precio del renglón exacto que ganó (esa medida, ese proveedor). Sin esto,
+      // Cotizar no sabría cuál de los N precios del papel usar — todos son del
+      // mismo servicio y solo se distinguen por medida.
+      papelPrecioEscalon: papelDelSeleccionado?.precio ?? null,
       sustratoServicioId: sustratoServicioId || null,
       sustratoProvId: sustratoProvId || null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [results, best?.sheet?.label, papelServicioId, papelDelSeleccionado?.provId, sustratoServicioId, sustratoProvId]);
+  }, [results, best?.sheet?.label, papelServicioId, papelDelSeleccionado?.provId, papelDelSeleccionado?.precio, sustratoServicioId, sustratoProvId]);
 
   // When user picks a sheet, update parent calcData
   const selectSheet = (row) => {
@@ -2942,8 +2983,15 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const coloresManual = (tf + tv) > 0 ? (tf + tv) : null; // si ambos están vacíos, usa 1 por defecto
   const cantidadPantones = Math.max(pantonesList.filter(p => p.codigo).length || pantonesList.length, 1);
 
-  const costoPapel = papelProvId && papelServicioId && pliegos
-    ? (costoDe(papelProvId, papelServicioId, pliegos) || 0) : 0;
+  // El papel puede tener muchos precios (uno por medida), así que se usa el
+  // renglón exacto que se eligió en 📐 Pliegos, no el que saldría por tiraje.
+  // El precio se recalcula sobre los pliegos de Cotizar, que traen la merma
+  // extra de acabados.
+  const costoPapel = papelServicioId && pliegos
+    ? (calcData?.papelPrecioEscalon != null
+        ? (costoServicioPorCantidad(servicioPorId(papelServicioId)?.unidad_precio, calcData.papelPrecioEscalon, pliegos) || 0)
+        : (papelProvId ? (costoDe(papelProvId, papelServicioId, pliegos) || 0) : 0))
+    : 0;
   const costoSustrato = sustratoProvId && sustratoServicioId && pliegos
     ? (costoDe(sustratoProvId, sustratoServicioId, pliegos) || 0) : 0;
   const costoImp = impProvId && impServicioId && pliegos
