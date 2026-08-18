@@ -692,6 +692,11 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
   const [formPrecio, setFormPrecio] = useState("");
   const [formHoras, setFormHoras] = useState("");
   const [formNotas, setFormNotas] = useState("");
+  // Campos propios del papel — solo se piden cuando la categoría elegida es "papel".
+  const [formTamano, setFormTamano] = useState("");
+  const [formGramaje, setFormGramaje] = useState("");
+  const [formPuntos, setFormPuntos] = useState("");
+  const [formCaras, setFormCaras] = useState("");
   const [formError, setFormError] = useState("");
   const [guardandoProceso, setGuardandoProceso] = useState(false);
 
@@ -858,13 +863,19 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
 
     setPrecios(prev => {
       const actuales = (prev[servicio.id]?.escalones || []).filter(e => e.precio !== "" && e.precio != null);
-      const nuevoEsc = { ...nuevoEscalon(), precio: formPrecio, tiempo_horas: formHoras, notas: formNotas };
+      const m = formTamano.match(/^\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*$/);
+      const nuevoEsc = {
+        ...nuevoEscalon(), precio: formPrecio, tiempo_horas: formHoras, notas: formNotas,
+        ancho: m ? m[1] : "", alto: m ? m[2] : "",
+        gramaje: formGramaje, puntos: formPuntos, caras: formCaras,
+      };
       return { ...prev, [servicio.id]: { escalones: [nuevoEsc, ...actuales], historial: prev[servicio.id]?.historial || [] } };
     });
     setIdsVisibles(prev => new Set(prev).add(servicio.id));
     setSucio(true);
 
     setFormNombre(""); setFormCategoriaNueva(""); setFormPrecio(""); setFormHoras(""); setFormNotas("");
+    setFormTamano(""); setFormGramaje(""); setFormPuntos(""); setFormCaras("");
     setMostrandoForm(false);
     setGuardandoProceso(false);
   };
@@ -947,6 +958,38 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
                   type="number" step="0.5" placeholder="—" style={inputStyle} />
               </div>
             </div>
+
+            {formCategoria === "papel" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+                <div>
+                  <label style={labelStyle}>Tamaño (cm)</label>
+                  <input list="mrb-tamanos-papel-nuevo" value={formTamano} onChange={e => setFormTamano(e.target.value)}
+                    placeholder="90x75" style={inputStyle} />
+                  <datalist id="mrb-tamanos-papel-nuevo">
+                    {TAMANOS_PAPEL_COMUNES.map(t => <option key={t} value={t} />)}
+                  </datalist>
+                </div>
+                <div>
+                  <label style={labelStyle}>Grs/m²</label>
+                  <input value={formGramaje} onChange={e => setFormGramaje(e.target.value)}
+                    type="number" step="1" placeholder="150" style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Puntos</label>
+                  <input value={formPuntos} onChange={e => setFormPuntos(e.target.value)}
+                    type="number" step="1" placeholder="—" style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Caras</label>
+                  <select value={formCaras} onChange={e => setFormCaras(e.target.value)}
+                    style={{ ...inputStyle, appearance: "none" }}>
+                    <option value="">—</option>
+                    <option value="1">1 cara</option>
+                    <option value="2">2 caras</option>
+                  </select>
+                </div>
+              </div>
+            )}
 
             <input value={formNotas} onChange={e => setFormNotas(e.target.value)}
               placeholder="Notas (incluye setup, planchas, condiciones especiales…)"
@@ -1891,7 +1934,9 @@ function AdminProveedores() {
                     }}>
                     {TIPOS_PROVEEDOR.map(t => <option key={t} value={t} style={{ color: C.text, background: C.card }}>{t}</option>)}
                   </select>
-                  <span title={prov.calificacion > 0 ? "Calificación calculada de sus entregas registradas" : "Sin entregas registradas todavía"}>
+                  <span title={prov.calificacion > 0
+                    ? "Promedio de las entregas calificadas en 📅 Cronograma"
+                    : "Sin calificar todavía — se llena al marcar un trabajo como entregado en 📅 Cronograma"}>
                     {[1, 2, 3, 4, 5].map(n => (
                       <span key={n} style={{ color: n <= Math.round(prov.calificacion || 0) ? "#F5A623" : C.border, fontSize: 15 }}>★</span>
                     ))}
