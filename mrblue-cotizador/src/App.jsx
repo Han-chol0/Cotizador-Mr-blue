@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── Cliente Supabase ────────────────────────────────────────────────────────
@@ -184,7 +184,7 @@ async function guardarPliegosEnSupabase(supabaseId, calcData) {
   const piezasPorPliego = calcData.selectedSheet.piecesPerSheet;
   const mermaPct    = parseFloat(calcData.merma) || 0;
   const produccion  = Math.ceil(calcData.qty / piezasPorPliego);
-  const totales     = Math.ceil(produccion * (1 + mermaPct / 100));
+  const totales     = totalConMermaDe(produccion, mermaPct, calcData.mermaPliegosFijos);
   const merma       = totales - produccion;
   const { error } = await supabase
     .from("solicitudes_cotizador")
@@ -221,6 +221,11 @@ function mapClickUpToCot(raw) {
   const base = emptyCotizacion();
   // Los campos pueden venir ya con nombres del cotizador (desde cotizar.py)
   // o con nombres de ClickUp (desde Make.com). Soportamos ambos.
+  // ClickUp normalmente manda un solo campo de tintas como texto combinado
+  // ("4/4"), no separado en frente/vuelta — si no vienen los campos separados,
+  // los partimos de ahí para que el conteo de colores en Cotizar no se quede corto.
+  const numTintasRaw = toStr(raw.num_tintas || raw.tintas) || "";
+  const tintasPartidas = numTintasRaw.match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/);
   return {
     ...base,
     // ── Datos del proyecto ──────────────────────────────────────────────────
@@ -237,9 +242,9 @@ function mapClickUpToCot(raw) {
     papel_acabado_gramaje: toStr(raw.papel_acabado_gramaje || raw.papel || raw.papel_gramaje) || "",
     tamano_extendido:      toStr(raw.tamano_extendido || raw.size_extendido) || "",
     tamano_final:          toStr(raw.tamano_final || raw.size_final)     || "",
-    num_tintas:            toStr(raw.num_tintas || raw.tintas)           || "",
-    tintas_frente:         toStr(raw.tintas_frente)                      || "",
-    tintas_vuelta:         toStr(raw.tintas_vuelta)                      || "",
+    num_tintas:            numTintasRaw,
+    tintas_frente:         toStr(raw.tintas_frente) || (tintasPartidas ? tintasPartidas[1] : ""),
+    tintas_vuelta:         toStr(raw.tintas_vuelta) || (tintasPartidas ? tintasPartidas[2] : ""),
     lleva_pantone:         toBool(raw.lleva_pantone || raw.pantone),
     pantones:              toStr(raw.pantones)                           || "",
     son_promocionales:     toBool(raw.son_promocionales || raw.promocionales),
@@ -295,9 +300,15 @@ function calcImposition(sheetW, sheetH, pieceW, pieceH, margin = 0.5) {
 }
 
 // ─── Filtra pliegos según máquina ────────────────────────────────────────────
-function filterSheetsByMachine(machine) {
-  if (!machine) return STANDARD_SHEETS.map(s => ({ ...s, compatible: true }));
-  return STANDARD_SHEETS.map(s => {
+function filterSheetsByMachine(machine, extraSheets = []) {
+  // A los 6 estándar se les suman las medidas que algún papelero de verdad vende
+  // (capturadas con su precio), para poder comparar contra ellas.
+  const todos = [...STANDARD_SHEETS];
+  extraSheets.forEach(e => {
+    if (!todos.some(s => s.w === e.w && s.h === e.h)) todos.push(e);
+  });
+  if (!machine) return todos.map(s => ({ ...s, compatible: true }));
+  return todos.map(s => {
     const fitW = s.w >= machine.minW && s.w <= machine.maxW;
     const fitH = s.h >= machine.minH && s.h <= machine.maxH;
     return { ...s, compatible: fitW && fitH };
@@ -332,11 +343,11 @@ function Stat({ label, value, bold, accent }) {
 }
 
 // ─── Resultado por tamaño de pliego ──────────────────────────────────────────
-function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect, impresores }) {
+function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect, impresores, papelInfo, esMasBarato }) {
   if (!compatible && !showIncompatible) return null;
 
   const totalRaw = result.piecesPerSheet > 0 ? Math.ceil(qty / result.piecesPerSheet) : null;
-  const totalConMerma = totalRaw ? Math.ceil(totalRaw * (1 + mermaPercent / 100)) : null;
+  const totalConMerma = totalConMermaDe(totalRaw, mermaPercent, mermaPliegosFijos);
   const mermaExtra = totalConMerma && totalRaw ? totalConMerma - totalRaw : 0;
   const areaM2 = (sheet.w * sheet.h) / 10000;
   const totalKg = totalConMerma ? totalConMerma * (areaM2 * gramaje) / 1000 : null;
@@ -378,9 +389,14 @@ function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, co
           )}
         </div>
         {compatible && (
-          <span style={{ background: isSelected ? C.cyan : badgeColor, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
-            {score > 0 ? score + " pzas/pliego" : "No cabe"}
-          </span>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {esMasBarato && (
+              <span style={{ background: C.green, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>💰 MÁS BARATO</span>
+            )}
+            <span style={{ background: isSelected ? C.cyan : badgeColor, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+              {score > 0 ? score + " pzas/pliego" : "No cabe"}
+            </span>
+          </div>
         )}
       </div>
       {compatible && score > 0 && (
@@ -393,8 +409,26 @@ function SheetResult({ sheet, result, qty, mermaPercent, pricePerKg, gramaje, co
             <Stat label="Merma +" value={mermaExtra > 0 ? "+" + mermaExtra : "0"} />
             <Stat label="Pliegos totales" value={totalConMerma?.toLocaleString("es-MX") ?? "\u2014"} bold />
             <Stat label="Peso estimado" value={totalKg ? totalKg.toFixed(1) + " kg" : "\u2014"} />
-            {totalCost && <Stat label="Costo papel" value={"$" + totalCost.toLocaleString("es-MX", { minimumFractionDigits: 2 })} bold accent />}
+            {totalCost && !papelInfo && <Stat label="Costo papel (por kg)" value={"$" + totalCost.toLocaleString("es-MX", { minimumFractionDigits: 2 })} bold accent />}
           </div>
+        </div>
+      )}
+      {compatible && score > 0 && papelInfo && (
+        <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px dashed ${C.border}` }}>
+          {papelInfo.sinPrecio ? (
+            <div style={{ fontSize: 10.5, color: C.muted }}>
+              Ningún proveedor tiene precio capturado para esta medida.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "6px 14px", alignItems: "start" }}>
+              <Stat label="$ / pliego" value={"$" + papelInfo.unitario.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} />
+              <Stat label="Costo papel" value={"$" + papelInfo.costoTotal.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} bold accent />
+              <Stat label="Papel por pieza" value={"$" + papelInfo.costoPorPieza.toLocaleString("es-MX", { minimumFractionDigits: 3, maximumFractionDigits: 3 })} />
+              <div style={{ gridColumn: "1 / -1", fontSize: 10.5, color: C.muted }}>
+                Mejor precio: <b style={{ color: C.text }}>{papelInfo.provNombre}</b>
+              </div>
+            </div>
+          )}
         </div>
       )}
       {compatible && score > 0 && (() => {
@@ -466,7 +500,10 @@ function colorForCategoria(categorias, cat) {
   return idx >= 0 ? PALETA_CATEGORIAS[idx % PALETA_CATEGORIAS.length] : C.muted;
 }
 
-const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "" });
+const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "", ancho: "", alto: "", gramaje: "", puntos: "" });
+
+// Medidas de pliego más comunes en el mercado mexicano, para el datalist de "Tamaño".
+const TAMANOS_PAPEL_COMUNES = ["90x75", "70x100", "65x90", "60x90", "76x112", "70x95", "63.5x88"];
 
 // Elige el escalón de precio que corresponde a una cantidad dada.
 // escalones: [{ tiraje_min, tiraje_max, precio }], tiraje_max vacío/null = "en adelante".
@@ -532,7 +569,7 @@ function costoServicioPorCantidad(unidad_precio, precio, qty, areaM2PorUnidad) {
 // Compara dos listas de escalones ignorando el campo `id` (que solo existe en los ya guardados).
 function escalonesIguales(a, b) {
   const norm = arr => (arr || [])
-    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}`)
+    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}|${e.ancho ?? ""}|${e.alto ?? ""}|${e.gramaje ?? ""}|${e.puntos ?? ""}`)
     .sort();
   const na = norm(a), nb = norm(b);
   return na.length === nb.length && na.every((v, i) => v === nb[i]);
@@ -595,6 +632,17 @@ const TABLA_MERMA_IMPRESION = [
 
 // Devuelve { tipo: 'hojas'|'pct', valor } — hojas = número fijo de pliegos extra;
 // pct = porcentaje a aplicar sobre el tiraje.
+// Aplica la merma sobre los pliegos netos. Dos modos:
+//  - pliegos fijos: sumas una cantidad exacta de pliegos (igual para toda medida)
+//  - porcentaje: se calcula proporcional a los netos (el de la tabla, o el que captures)
+// mermaPliegosFijos = null/undefined significa "usa el porcentaje".
+function totalConMermaDe(neto, mermaPct, mermaPliegosFijos) {
+  if (neto == null) return null;
+  const fijos = parseFloat(mermaPliegosFijos);
+  if (Number.isFinite(fijos) && fijos >= 0) return neto + Math.round(fijos);
+  return Math.ceil(neto * (1 + (parseFloat(mermaPct) || 0) / 100));
+}
+
 function mermaBaseImpresion(tiraje) {
   const q = Math.max(0, parseFloat(tiraje) || 0);
   const fila = TABLA_MERMA_IMPRESION.find(f => q >= f.min && q <= f.max) || TABLA_MERMA_IMPRESION[TABLA_MERMA_IMPRESION.length - 1];
@@ -614,7 +662,9 @@ function fmtP(n) {
 // ── Editor de precios de un proveedor ────────────────────────────────────────
 // El catálogo de servicios/procesos se lee de Supabase (servicios_catalogo),
 // así que agregar o quitar servicios ahí se refleja aquí sin tocar código.
-function FichaPrecios({ prov, onSave }) {
+// soloCats / excluirCats permiten partir la ficha en varias pestañas
+// (ej. papeleros: "Precios" muestra papeles, "Sustratos" muestra imán/rígidos).
+function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta }) {
   // precios: { [servicio_id]: { escalones: [{id, tiraje_min, tiraje_max, precio, notas}], historial: [...] } }
   const [catalogo, setCatalogo] = useState([]);
   const [loadingCat, setLoadingCat] = useState(true);
@@ -670,6 +720,12 @@ function FichaPrecios({ prov, onSave }) {
     setPrecios(prev => {
       const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
       return { ...prev, [sid]: { ...base, escalones: base.escalones.map((e, i) => i === idx ? { ...e, [field]: val } : e) } };
+    });
+  // Igual que updateEscalon pero para varios campos a la vez (ej. Tamaño → ancho + alto juntos).
+  const updateEscalonMulti = (sid, idx, campos) =>
+    setPrecios(prev => {
+      const base = prev[sid] || { escalones: [nuevoEscalon()], historial: [] };
+      return { ...prev, [sid]: { ...base, escalones: base.escalones.map((e, i) => i === idx ? { ...e, ...campos } : e) } };
     });
   const addEscalon = (sid) =>
     setPrecios(prev => {
@@ -761,7 +817,10 @@ function FichaPrecios({ prov, onSave }) {
   const unidadLabel = { por_millar: "$ / millar", por_pieza: "$ / pieza", unidad: "$ / unidad", por_kg: "$ / kg", por_m2: "$ / m²", fijo: "$ (costo único)" };
   const rangoUnidadLabel = { por_millar: "pliegos/piezas reales — ej. 1 a 1000, 1001 a 2000…", por_pieza: "piezas", unidad: "unidades", por_kg: "kg", por_m2: "pliegos o piezas (el precio ya se multiplica por su área en m²)" };
 
-  const procesosProveedor = catalogo.filter(s => tieneAlgunPrecio(s));
+  const enFiltro = (s) =>
+    (!soloCats || soloCats.includes(s.categoria)) &&
+    (!excluirCats || !excluirCats.includes(s.categoria));
+  const procesosProveedor = catalogo.filter(s => tieneAlgunPrecio(s) && enFiltro(s));
   const hayImpresionVisible = procesosProveedor.some(s => s.categoria === "impresion");
 
   return (
@@ -857,7 +916,7 @@ function FichaPrecios({ prov, onSave }) {
 
       {procesosProveedor.length === 0 && (
         <div style={{ color: C.muted, fontSize: 12, padding: "10px 4px" }}>
-          Este proveedor todavía no tiene procesos con precio. Usa "+ Agregar proceso" para capturar el primero.
+          Este proveedor todavía no tiene {etiqueta || "procesos"} con precio. Usa "+ Agregar proceso" para capturar el primero.
         </div>
       )}
 
@@ -866,6 +925,8 @@ function FichaPrecios({ prov, onSave }) {
         const claveActiva = claveEscalon(s.id, maquinaSel);
         const d = precios[claveActiva] || { escalones: [nuevoEscalon()], historial: [] };
         const esFijo = s.unidad_precio === "fijo";
+        const esPapel = s.categoria === "papel";
+        const colsEscalon = esPapel ? "95px 62px 55px 1fr 60px 32px" : "80px 80px 1fr 70px 32px";
 
         return (
           <div key={s.id} style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
@@ -893,29 +954,60 @@ function FichaPrecios({ prov, onSave }) {
               </div>
             )}
 
-            {!esFijo && (
+            {!esFijo && !esPapel && (
               <div style={{ padding: "0 12px", fontSize: 10.5, color: C.muted }}>
                 "Desde"/"Hasta" son {rangoUnidadLabel[s.unidad_precio] || "cantidad real"} — no "número de millar".
               </div>
             )}
+            {esPapel && (
+              <div style={{ padding: "0 12px 4px", fontSize: 10.5, color: C.cyan }}>
+                📄 Captura la medida del pliego (y grs/m² o puntos si es cartulina) en cada renglón — así el Cotizador puede comparar qué medida sale más barata.
+              </div>
+            )}
             {!esFijo && (
-              <div style={{ display: "grid", gridTemplateColumns: "80px 80px 1fr 70px 32px", gap: "0 8px",
+              <div style={{ display: "grid", gridTemplateColumns: colsEscalon, gap: "0 8px",
                 padding: "0 12px 4px", fontSize: 10, fontWeight: 700, color: C.muted,
                 textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                <div>Desde</div><div>Hasta</div><div>{unidadLabel[s.unidad_precio] || "$"}</div><div>Horas</div><div />
+                {esPapel
+                  ? <><div>Tamaño</div><div>Grs/m²</div><div>Puntos</div></>
+                  : <><div>Desde</div><div>Hasta</div></>}
+                <div>{unidadLabel[s.unidad_precio] || "$"}</div><div>Horas</div><div />
               </div>
             )}
 
             {d.escalones.map((e, idx) => (
               <div key={idx} style={{ display: "grid",
-                gridTemplateColumns: esFijo ? "1fr 70px 32px" : "80px 80px 1fr 70px 32px",
+                gridTemplateColumns: esFijo ? "1fr 70px 32px" : colsEscalon,
                 gap: 8, padding: "4px 12px", alignItems: "center" }}>
-                {!esFijo && <>
+                {!esFijo && !esPapel && <>
                   <input value={e.tiraje_min} onChange={ev => updateEscalon(claveActiva, idx, "tiraje_min", ev.target.value)}
                     type="number" placeholder="1" title="Cantidad mínima"
                     style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
                   <input value={e.tiraje_max} onChange={ev => updateEscalon(claveActiva, idx, "tiraje_max", ev.target.value)}
                     type="number" placeholder="en adelante" title="Cantidad máxima (vacío = en adelante)"
+                    style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                </>}
+                {esPapel && !esFijo && <>
+                  <div>
+                    <input list={`mrb-tamanos-papel-${s.id}`}
+                      value={e.ancho && e.alto ? `${e.ancho}x${e.alto}` : ""}
+                      onChange={ev => {
+                        const val = ev.target.value;
+                        const m = val.match(/^\s*(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*$/);
+                        if (m) updateEscalonMulti(claveActiva, idx, { ancho: m[1], alto: m[2] });
+                      }}
+                      title="Medida del pliego, ancho×alto en cm (ej. 90x75)"
+                      placeholder="90x75"
+                      style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                    <datalist id={`mrb-tamanos-papel-${s.id}`}>
+                      {TAMANOS_PAPEL_COMUNES.map(t => <option key={t} value={t} />)}
+                    </datalist>
+                  </div>
+                  <input value={e.gramaje} onChange={ev => updateEscalon(claveActiva, idx, "gramaje", ev.target.value)}
+                    type="number" step="1" placeholder="150" title="Gramaje (g/m²)"
+                    style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
+                  <input value={e.puntos} onChange={ev => updateEscalon(claveActiva, idx, "puntos", ev.target.value)}
+                    type="number" step="1" placeholder="—" title="Puntos de grosor (solo cartulinas)"
                     style={{ ...inputStyle, fontSize: 12, textAlign: "right", padding: "6px 8px" }} />
                 </>}
                 <div style={{ position: "relative" }}>
@@ -980,7 +1072,7 @@ async function loadProveedoresDB() {
   const { data: maqs } = await supabase.from("maquinas").select("*");
   const { data: tarifas } = await supabase
     .from("tarifas")
-    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at")
+    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at, ancho, alto, gramaje, puntos")
     .order("tiraje_min", { ascending: true, nullsFirst: true });
 
   return (provs || []).map(p => {
@@ -1010,6 +1102,7 @@ async function loadProveedoresDB() {
         precios[clave].escalones.push({
           id: t.id, tiraje_min: t.tiraje_min ?? "", tiraje_max: t.tiraje_max ?? "",
           precio: t.precio, tiempo_horas: t.tiempo_horas ?? "", notas: t.notas_precio || "",
+          ancho: t.ancho ?? "", alto: t.alto ?? "", gramaje: t.gramaje ?? "", puntos: t.puntos ?? "",
         });
       }
     });
@@ -1187,6 +1280,10 @@ async function savePreciosDB(provId, precios, previos) {
         tiraje_max: e.tiraje_max === "" ? null : parseFloat(e.tiraje_max),
         tiempo_horas: e.tiempo_horas === "" || e.tiempo_horas == null ? null : parseFloat(e.tiempo_horas),
         notas_precio: e.notas || null,
+        ancho: e.ancho === "" || e.ancho == null ? null : parseFloat(e.ancho),
+        alto: e.alto === "" || e.alto == null ? null : parseFloat(e.alto),
+        gramaje: e.gramaje === "" || e.gramaje == null ? null : parseFloat(e.gramaje),
+        puntos: e.puntos === "" || e.puntos == null ? null : parseFloat(e.puntos),
         activo: true,
       }));
       const { error: eIns } = await supabase.from("tarifas").insert(rows);
@@ -1577,6 +1674,16 @@ function AdminProveedores() {
   const [newProvTipo, setNewProvTipo]       = useState(TIPOS_PROVEEDOR[0]);
   const [filtroTipo, setFiltroTipo]         = useState("Todos");
   const [expanded, setExpanded]   = useState({});   // { id: 'maquinas'|'precios'|false }
+  // Catálogo indexado por id, para saber a qué categoría pertenece cada precio
+  // (se usa para contar cuántos sustratos tiene un papelero).
+  const [catalogoPorId, setCatalogoPorId] = useState({});
+  useEffect(() => {
+    loadServiciosCatalogo().then(cat => {
+      const idx = {};
+      (cat || []).forEach(s => { idx[s.id] = s; });
+      setCatalogoPorId(idx);
+    });
+  }, []);
 
   const recargar = async () => { setProveedores(await loadProveedoresDB()); setLoading(false); };
 
@@ -1666,6 +1773,13 @@ function AdminProveedores() {
       {proveedores.filter(p => filtroTipo === "Todos" || p.tipo === filtroTipo).map(prov => {
         const preciosConDatos = Object.values(prov.precios || {}).filter(d => (d?.escalones || []).some(e => parseFloat(e.precio) > 0)).length;
         const maqCount = prov.maquinas?.length ?? 0;
+        const esPapelero = prov.tipo === "Papel";
+        // Cuántos sustratos especiales tiene con precio — se muestra en la pestaña.
+        const CATS_SUSTRATO = ["magnetico", "sustrato_rigido"];
+        const sustratosCount = Object.entries(prov.precios || {}).filter(([clave, d]) =>
+          (d?.escalones || []).some(e => parseFloat(e.precio) > 0) &&
+          CATS_SUSTRATO.includes(catalogoPorId[parseClaveEscalon(clave).servicioId]?.categoria)
+        ).length;
 
         return (
           <div key={prov.id} style={{ ...cardStyle, marginBottom: 12 }}>
@@ -1689,7 +1803,9 @@ function AdminProveedores() {
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
-                  {maqCount === 0 ? "Sin máquinas" : `${maqCount} máquina${maqCount > 1 ? "s" : ""}`}
+                  {esPapelero
+                    ? (sustratosCount === 0 ? "Sin sustratos especiales" : `${sustratosCount} sustrato${sustratosCount > 1 ? "s" : ""} especial${sustratosCount > 1 ? "es" : ""}`)
+                    : (maqCount === 0 ? "Sin máquinas" : `${maqCount} máquina${maqCount > 1 ? "s" : ""}`)}
                   {preciosConDatos > 0 && <span style={{ marginLeft: 8, color: C.green }}>· {preciosConDatos} proceso{preciosConDatos > 1 ? "s" : ""} con precio</span>}
                 </div>
                 <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
@@ -1705,12 +1821,21 @@ function AdminProveedores() {
                     border: `1.5px solid ${expanded[prov.id] === "contacto" ? C.purple : C.border}` }}>
                   📇 Contacto{(prov.email || prov.whatsapp || prov.contactoNombre) && <span style={{ marginLeft: 3 }}>✓</span>}
                 </button>
-                <button onClick={() => toggleSection(prov.id, "maquinas")}
-                  style={{ ...btn(expanded[prov.id] === "maquinas" ? C.navy : C.bg),
-                    color: expanded[prov.id] === "maquinas" ? "#fff" : C.muted,
-                    border: `1.5px solid ${expanded[prov.id] === "maquinas" ? C.navy : C.border}` }}>
-                  🖨 Máquinas
-                </button>
+                {esPapelero ? (
+                  <button onClick={() => toggleSection(prov.id, "sustratos")}
+                    style={{ ...btn(expanded[prov.id] === "sustratos" ? C.navy : C.bg),
+                      color: expanded[prov.id] === "sustratos" ? "#fff" : C.muted,
+                      border: `1.5px solid ${expanded[prov.id] === "sustratos" ? C.navy : C.border}` }}>
+                    🧲 Sustratos{sustratosCount > 0 && <span style={{ marginLeft: 3 }}>({sustratosCount})</span>}
+                  </button>
+                ) : (
+                  <button onClick={() => toggleSection(prov.id, "maquinas")}
+                    style={{ ...btn(expanded[prov.id] === "maquinas" ? C.navy : C.bg),
+                      color: expanded[prov.id] === "maquinas" ? "#fff" : C.muted,
+                      border: `1.5px solid ${expanded[prov.id] === "maquinas" ? C.navy : C.border}` }}>
+                    🖨 Máquinas
+                  </button>
+                )}
                 <button onClick={() => toggleSection(prov.id, "precios")}
                   style={{ ...btn(expanded[prov.id] === "precios" ? C.cyan : C.bg),
                     color: expanded[prov.id] === "precios" ? "#fff" : C.muted,
@@ -1810,9 +1935,22 @@ function AdminProveedores() {
               </div>
             )}
 
+            {/* Sección: Sustratos especiales (solo papeleros — reemplaza Máquinas) */}
+            {expanded[prov.id] === "sustratos" && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 12px", fontSize: 11.5, color: C.text, marginBottom: 4 }}>
+                  🧲 Imán, PVC, acrílico y otros sustratos rígidos. Se cobran <b>por pieza</b> (no por medida de pliego), así que aquí "Desde"/"Hasta" son cantidades de piezas.
+                </div>
+                <FichaPrecios prov={prov} onSave={savePrecios}
+                  soloCats={CATS_SUSTRATO} etiqueta="sustratos" />
+              </div>
+            )}
+
             {/* Sección: Precios por proceso */}
             {expanded[prov.id] === "precios" && (
-              <FichaPrecios prov={prov} onSave={savePrecios} />
+              esPapelero
+                ? <FichaPrecios prov={prov} onSave={savePrecios} excluirCats={CATS_SUSTRATO} etiqueta="papeles" />
+                : <FichaPrecios prov={prov} onSave={savePrecios} />
             )}
 
             {/* Sección: Archivos (listas de precios en PDF/Excel/CSV) */}
@@ -1845,6 +1983,8 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [qty, setQty] = useState(() => cotizacion?.cantidad || "1000");
   const [merma, setMerma] = useState("5");
   const [mermaAuto, setMermaAuto] = useState(true); // true = se calcula sola con la tabla de merma; false = la editaste a mano
+  const [mermaModo, setMermaModo] = useState("pct"); // "pct" = porcentaje · "pliegos" = cantidad fija de pliegos
+  const [mermaPliegos, setMermaPliegos] = useState(""); // solo aplica cuando mermaModo === "pliegos"
   const [gramaje, setGramaje] = useState(() => {
     if (cotizacion?.papel_acabado_gramaje) {
       // Extrae todos los números del texto (ej: "Sbs 12\nsbs 10 puntos" → ["12","10"])
@@ -1861,11 +2001,98 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [papelNombre, setPapelNombre] = useState(() => cotizacion?.papel_acabado_gramaje ? cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() : "");
   // Impresores con sus pliegos de rutina, para marcar en cada tarjeta quién lo maneja.
   const [impresores, setImpresores] = useState([]);
+  // Catálogo de papeles + todos los proveedores, para comparar el costo real de cada medida.
+  const [catalogoPapel, setCatalogoPapel] = useState([]);
+  const [todosProvs, setTodosProvs] = useState([]);
+  const [papelServicioId, setPapelServicioId] = useState("");
+  const [busquedaPapel, setBusquedaPapel] = useState("");
+  // Sustratos especiales (imán, PVC, acrílico, etc.) — se cobran por pieza, no
+  // por medida de pliego, así que aquí es un selector simple de proveedor.
+  const [catalogoSustrato, setCatalogoSustrato] = useState([]);
+  const [sustratoServicioId, setSustratoServicioId] = useState("");
+  const [sustratoProvId, setSustratoProvId] = useState("");
+  const [busquedaSustrato, setBusquedaSustrato] = useState("");
+  const [materialModo, setMaterialModo] = useState("papel"); // "papel" | "sustrato"
+
   useEffect(() => {
-    loadProveedoresDB().then(ps => setImpresores(
-      (ps || []).filter(p => p.tipo === "Impresores" && (p.pliegosManeja || []).length > 0)
-    ));
+    loadProveedoresDB().then(ps => {
+      setTodosProvs(ps || []);
+      setImpresores((ps || []).filter(p => p.tipo === "Impresores" && (p.pliegosManeja || []).length > 0));
+    });
+    loadServiciosCatalogo().then(cat => {
+      setCatalogoPapel((cat || []).filter(s => s.categoria === "papel"));
+      setCatalogoSustrato((cat || []).filter(s => s.categoria === "magnetico" || s.categoria === "sustrato_rigido"));
+    });
   }, []);
+
+  // Todos los renglones de precio del papel elegido, con su medida y proveedor.
+  const opcionesPapel = useMemo(() => {
+    if (!papelServicioId) return [];
+    const out = [];
+    todosProvs.forEach(p => {
+      Object.keys(p.precios || {}).forEach(clave => {
+        if (parseClaveEscalon(clave).servicioId !== papelServicioId) return;
+        (p.precios[clave].escalones || []).forEach(e => {
+          const w = parseFloat(e.ancho), h = parseFloat(e.alto), precio = parseFloat(e.precio);
+          if (!(w > 0 && h > 0 && precio > 0)) return;
+          out.push({ w, h, precio, provNombre: p.nombre, provId: p.id,
+            tiraje_min: e.tiraje_min, tiraje_max: e.tiraje_max });
+        });
+      });
+    });
+    return out;
+  }, [papelServicioId, todosProvs]);
+
+  const servicioPapel = catalogoPapel.find(s => s.id === papelServicioId);
+
+  // Para una medida de pliego y una cantidad, la opción más barata disponible.
+  const mejorPrecioPliego = (w, h, pliegosTotales) => {
+    const candidatos = opcionesPapel.filter(o => o.w === w && o.h === h);
+    if (!candidatos.length) return null;
+    const conCosto = candidatos.map(o => {
+      const min = o.tiraje_min === "" || o.tiraje_min == null ? 0 : parseFloat(o.tiraje_min);
+      const max = o.tiraje_max === "" || o.tiraje_max == null ? Infinity : parseFloat(o.tiraje_max);
+      const aplica = pliegosTotales >= min && pliegosTotales <= max;
+      const costo = costoServicioPorCantidad(servicioPapel?.unidad_precio, o.precio, pliegosTotales);
+      return { ...o, aplica, costoTotal: costo, unitario: costo != null && pliegosTotales > 0 ? costo / pliegosTotales : null };
+    }).filter(o => o.costoTotal != null);
+    if (!conCosto.length) return null;
+    const enRango = conCosto.filter(o => o.aplica);
+    const pool = enRango.length ? enRango : conCosto;
+    return pool.sort((a, b) => a.costoTotal - b.costoTotal)[0];
+  };
+
+  const servicioSustrato = catalogoSustrato.find(s => s.id === sustratoServicioId);
+
+  // Proveedores con precio para el sustrato elegido, calculado sobre las piezas
+  // (no pliegos — imán/rígido se cobra por pieza), del más barato al más caro.
+  const proveedoresSustrato = useMemo(() => {
+    if (!sustratoServicioId) return [];
+    const qty_ = parseInt(qty) || 0;
+    const out = [];
+    todosProvs.forEach(p => {
+      Object.keys(p.precios || {}).forEach(clave => {
+        if (parseClaveEscalon(clave).servicioId !== sustratoServicioId) return;
+        const escalones = p.precios[clave].escalones || [];
+        const escalon = seleccionarEscalon(escalones, qtyRefParaEscalon(servicioSustrato?.unidad_precio, qty_));
+        if (!escalon) return;
+        const costo = costoServicioPorCantidad(servicioSustrato?.unidad_precio, escalon.precio, qty_);
+        if (costo == null) return;
+        out.push({ provId: p.id, provNombre: p.nombre, costoTotal: costo });
+      });
+    });
+    return out.sort((a, b) => a.costoTotal - b.costoTotal);
+  }, [sustratoServicioId, todosProvs, qty, servicioSustrato?.unidad_precio]);
+
+  // Auto-elige el proveedor más barato cada vez que cambia el sustrato o la cantidad,
+  // salvo que ya hayas elegido uno a mano que siga en la lista.
+  useEffect(() => {
+    if (!sustratoServicioId) { setSustratoProvId(""); return; }
+    if (sustratoProvId && proveedoresSustrato.some(p => p.provId === sustratoProvId)) return;
+    setSustratoProvId(proveedoresSustrato[0]?.provId || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sustratoServicioId, proveedoresSustrato]);
+
   const [results, setResults] = useState(null);
   const [showIncompatible, setShowIncompatible] = useState(false);
   const [selectedSheetLabel, setSelectedSheetLabel] = useState(null);
@@ -1877,7 +2104,10 @@ function Calculadora({ onCalcDone, cotizacion }) {
     if (!pw_ || !ph_ || !qty_) return;
     const impW = extW_ || pw_, impH = extH_ || ph_;
 
-    const sheetsWithCompat = filterSheetsByMachine(null);
+    // Suma las medidas que algún papelero de verdad vende para este papel,
+    // para poder compararlas contra los formatos estándar.
+    const medidasProveedor = opcionesPapel.map(o => ({ label: `${o.w}×${o.h} cm`, w: o.w, h: o.h }));
+    const sheetsWithCompat = filterSheetsByMachine(null, medidasProveedor);
 
     const raw = sheetsWithCompat.map(({ label, w, h, compatible }) => ({
       sheet: { label, w, h }, compatible,
@@ -1893,7 +2123,11 @@ function Calculadora({ onCalcDone, cotizacion }) {
     const pliegosNetosEst = autoSelect?.result.piecesPerSheet > 0 ? Math.ceil(qty_ / autoSelect.result.piecesPerSheet) : qty_;
 
     let merma_ = parseFloat(merma) || 0;
-    if (mermaAuto) {
+    const mermaFijos_ = mermaModo === "pliegos" && parseFloat(mermaPliegos) >= 0
+      ? Math.round(parseFloat(mermaPliegos)) : null;
+
+    // La tabla solo aplica en modo porcentaje; en modo pliegos fijos tú mandas.
+    if (mermaModo === "pct" && mermaAuto) {
       const tabla = mermaBaseImpresion(pliegosNetosEst);
       if (tabla.tipo === "pct") {
         merma_ = tabla.valor;
@@ -1903,11 +2137,10 @@ function Calculadora({ onCalcDone, cotizacion }) {
       setMerma(String(merma_));
     }
 
-    const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, gramaje: gramaje_, pricePerKg: pkkg, papelNombre, raw };
+    const res = { pw: pw_, ph: ph_, extW: extW_, extH: extH_, qty: qty_, merma: merma_, mermaPliegosFijos: mermaFijos_, gramaje: gramaje_, pricePerKg: pkkg, papelNombre, raw };
     setResults(res);
     const autoLabel = autoSelect?.sheet.label ?? null;
     setSelectedSheetLabel(autoLabel);
-    onCalcDone({ ...res, selectedSheet: autoSelect ? { ...autoSelect.sheet, ...autoSelect.result } : null });
   };
 
   const compatibles = results?.raw.filter(r => r.compatible) ?? [];
@@ -1915,15 +2148,53 @@ function Calculadora({ onCalcDone, cotizacion }) {
   // Use selected sheet if set, otherwise fall back to best
   const selectedRow = results?.raw.find(r => r.sheet.label === selectedSheetLabel);
   const best = selectedRow ?? autoB;
-  const bestTotal = best?.result.piecesPerSheet > 0
-    ? Math.ceil(Math.ceil(results.qty / best.result.piecesPerSheet) * (1 + results.merma / 100)) : null;
+  // Pliegos "de producción" = los netos que salen del tiro, sin merma.
+  const bestNeto = best?.result.piecesPerSheet > 0
+    ? Math.ceil(results.qty / best.result.piecesPerSheet) : null;
+  const bestTotal = totalConMermaDe(bestNeto, results?.merma, results?.mermaPliegosFijos);
+  const bestMerma = bestTotal != null && bestNeto != null ? bestTotal - bestNeto : null;
 
   const incompatiblesCount = results?.raw.filter(r => !r.compatible).length ?? 0;
+
+  // Cuál medida sale más barata en papel — ojo: NO siempre es la que más piezas rinde,
+  // porque un pliego más grande puede costar más de lo que ahorra en rendimiento.
+  const labelMasBarato = useMemo(() => {
+    if (!results || !papelServicioId) return null;
+    let mejor = null;
+    results.raw.forEach(row => {
+      if (!row.compatible || !(row.result.piecesPerSheet > 0)) return;
+      const neto = Math.ceil(results.qty / row.result.piecesPerSheet);
+      const tot = totalConMermaDe(neto, results.merma, results.mermaPliegosFijos);
+      const p = mejorPrecioPliego(row.sheet.w, row.sheet.h, tot);
+      if (p && (mejor == null || p.costoTotal < mejor.costo)) {
+        mejor = { label: row.sheet.label, costo: p.costoTotal };
+      }
+    });
+    return mejor?.label ?? null;
+  }, [results, papelServicioId, opcionesPapel]);
+
+  const papelDelSeleccionado = results && papelServicioId && bestTotal
+    ? mejorPrecioPliego(best.sheet.w, best.sheet.h, bestTotal) : null;
+
+  // Un solo lugar que avisa al padre: corre cada vez que cambia la hoja elegida
+  // o el papel del catálogo — así Cotizar recibe también qué papel/proveedor usar
+  // sin tener que volver a preguntarlo.
+  useEffect(() => {
+    if (!results || !best) return;
+    onCalcDone({
+      ...results,
+      selectedSheet: { ...best.sheet, ...best.result },
+      papelServicioId: papelServicioId || null,
+      papelProvId: papelDelSeleccionado?.provId || null,
+      sustratoServicioId: sustratoServicioId || null,
+      sustratoProvId: sustratoProvId || null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [results, best?.sheet?.label, papelServicioId, papelDelSeleccionado?.provId, sustratoServicioId, sustratoProvId]);
 
   // When user picks a sheet, update parent calcData
   const selectSheet = (row) => {
     setSelectedSheetLabel(row.sheet.label);
-    onCalcDone({ ...results, selectedSheet: { ...row.sheet, ...row.result } });
   };
 
   return (
@@ -1955,14 +2226,35 @@ function Calculadora({ onCalcDone, cotizacion }) {
             <input value={qty} onChange={e => setQty(e.target.value)} style={inputStyle} type="number" step="1" />
           </div>
           <div>
-            <label style={labelStyle}>Merma (%) {mermaAuto && <span style={{ color: C.green, fontWeight: 400 }}>· según tabla</span>}</label>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input value={merma} onChange={e => { setMerma(e.target.value); setMermaAuto(false); }} style={inputStyle} type="number" step="0.5" />
-              {!mermaAuto && (
-                <button onClick={() => setMermaAuto(true)} title="Volver a calcular con la tabla de merma"
-                  style={{ ...btn(C.bg, true), color: C.navy, border: `1.5px solid ${C.border}`, padding: "0 10px", whiteSpace: "nowrap" }}>↺ tabla</button>
-              )}
+            <div style={{ display: "flex", gap: 5, alignItems: "center", marginBottom: 4 }}>
+              <span style={{ ...labelStyle, marginBottom: 0 }}>Merma</span>
+              <button onClick={() => setMermaModo("pct")}
+                style={{ background: mermaModo === "pct" ? C.cyan : C.bg, color: mermaModo === "pct" ? "#fff" : C.muted,
+                  border: `1.5px solid ${mermaModo === "pct" ? C.cyan : C.border}`, borderRadius: 20,
+                  padding: "1px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>%</button>
+              <button onClick={() => setMermaModo("pliegos")}
+                style={{ background: mermaModo === "pliegos" ? C.cyan : C.bg, color: mermaModo === "pliegos" ? "#fff" : C.muted,
+                  border: `1.5px solid ${mermaModo === "pliegos" ? C.cyan : C.border}`, borderRadius: 20,
+                  padding: "1px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>pliegos</button>
+              {mermaModo === "pct" && mermaAuto && <span style={{ fontSize: 10, color: C.green, fontWeight: 700 }}>· SEGÚN TABLA</span>}
             </div>
+            {mermaModo === "pct" ? (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={merma} onChange={e => { setMerma(e.target.value); setMermaAuto(false); }} style={inputStyle} type="number" step="0.5" />
+                {!mermaAuto && (
+                  <button onClick={() => setMermaAuto(true)} title="Volver a calcular con la tabla de merma"
+                    style={{ ...btn(C.bg, true), color: C.navy, border: `1.5px solid ${C.border}`, padding: "0 10px", whiteSpace: "nowrap" }}>↺ tabla</button>
+                )}
+              </div>
+            ) : (
+              <>
+                <input value={mermaPliegos} onChange={e => setMermaPliegos(e.target.value)}
+                  style={inputStyle} type="number" step="1" placeholder="Ej: 300" />
+                <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
+                  Se suman estos pliegos exactos, igual para toda medida.
+                </div>
+              </>
+            )}
           </div>
           <div>
             <label style={labelStyle}>Gramaje / Puntos</label>
@@ -1982,6 +2274,121 @@ function Calculadora({ onCalcDone, cotizacion }) {
           </div>
 
         </div>
+
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1.5px solid ${C.border}` }}>
+          <div style={{ display: "flex", gap: 5, alignItems: "center", marginBottom: 8 }}>
+            <label style={{ ...labelStyle, marginBottom: 0 }}>Material</label>
+            <button onClick={() => setMaterialModo("papel")}
+              style={{ background: materialModo === "papel" ? C.cyan : C.bg, color: materialModo === "papel" ? "#fff" : C.muted,
+                border: `1.5px solid ${materialModo === "papel" ? C.cyan : C.border}`, borderRadius: 20,
+                padding: "1px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>papel</button>
+            <button onClick={() => setMaterialModo("sustrato")}
+              style={{ background: materialModo === "sustrato" ? C.cyan : C.bg, color: materialModo === "sustrato" ? "#fff" : C.muted,
+                border: `1.5px solid ${materialModo === "sustrato" ? C.cyan : C.border}`, borderRadius: 20,
+                padding: "1px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>sustrato</button>
+          </div>
+
+          {materialModo === "papel" && (
+            <>
+              <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 6 }}>Para comparar precio de cada medida de pliego.</div>
+              {papelServicioId ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "8px 12px" }}>
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text }}>
+                    {servicioPapel?.nombre}
+                    <span style={{ color: C.muted, fontWeight: 400, fontSize: 11.5 }}>
+                      {" · "}{opcionesPapel.length} {opcionesPapel.length === 1 ? "medida con precio" : "medidas con precio"}
+                    </span>
+                  </span>
+                  <button onClick={() => { setPapelServicioId(""); setBusquedaPapel(""); }}
+                    style={{ background: "none", border: "none", color: C.cyan, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Cambiar</button>
+                </div>
+              ) : (
+                <>
+                  <input value={busquedaPapel} onChange={e => setBusquedaPapel(e.target.value)}
+                    placeholder='🔍 Buscar papel por nombre (ej. "couché 250")…' style={inputStyle} />
+                  {busquedaPapel.length >= 2 && (
+                    <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: `1.5px solid ${C.border}`, borderRadius: 8 }}>
+                      {catalogoPapel
+                        .filter(s => normalizarTexto(s.nombre).includes(normalizarTexto(busquedaPapel)))
+                        .slice(0, 30)
+                        .map(s => (
+                          <div key={s.id} onClick={() => { setPapelServicioId(s.id); setPapelNombre(s.nombre); }}
+                            style={{ padding: "7px 12px", fontSize: 12.5, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                            {s.nombre}
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {papelServicioId && opcionesPapel.length === 0 && (
+                <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>
+                  Este papel todavía no tiene precios con medida capturada — ve a 🏭 Proveedores → Precios → Papel y captura ancho/alto en cada renglón.
+                </div>
+              )}
+            </>
+          )}
+
+          {materialModo === "sustrato" && (
+            <>
+              <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 6 }}>Imán, PVC, acrílico… se cobra por pieza, no por medida de pliego.</div>
+              {sustratoServicioId ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "8px 12px", marginBottom: 8 }}>
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text }}>
+                    {servicioSustrato?.nombre}
+                    <span style={{ color: C.muted, fontWeight: 400, fontSize: 11.5 }}>
+                      {" · "}{proveedoresSustrato.length} {proveedoresSustrato.length === 1 ? "proveedor con precio" : "proveedores con precio"}
+                    </span>
+                  </span>
+                  <button onClick={() => { setSustratoServicioId(""); setBusquedaSustrato(""); }}
+                    style={{ background: "none", border: "none", color: C.cyan, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Cambiar</button>
+                </div>
+              ) : (
+                <>
+                  <input value={busquedaSustrato} onChange={e => setBusquedaSustrato(e.target.value)}
+                    placeholder='🔍 Buscar sustrato por nombre (ej. "imán 0.6mm")…' style={inputStyle} />
+                  {busquedaSustrato.length >= 2 && (
+                    <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: `1.5px solid ${C.border}`, borderRadius: 8 }}>
+                      {catalogoSustrato
+                        .filter(s => normalizarTexto(s.nombre).includes(normalizarTexto(busquedaSustrato)))
+                        .slice(0, 30)
+                        .map(s => (
+                          <div key={s.id} onClick={() => setSustratoServicioId(s.id)}
+                            style={{ padding: "7px 12px", fontSize: 12.5, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                            {s.nombre}
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {sustratoServicioId && proveedoresSustrato.length === 0 && (
+                <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>
+                  Ningún proveedor tiene precio cargado para este sustrato — ve a 🏭 Proveedores → Precios.
+                </div>
+              )}
+              {sustratoServicioId && proveedoresSustrato.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {proveedoresSustrato.map((p, i) => (
+                    <div key={p.provId} onClick={() => setSustratoProvId(p.provId)}
+                      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer",
+                        background: sustratoProvId === p.provId ? "#EAF4FB" : C.bg,
+                        border: `1.5px solid ${sustratoProvId === p.provId ? C.cyan : C.border}`, borderRadius: 8, padding: "7px 12px" }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>
+                        {p.provNombre}
+                        {i === 0 && <span style={{ marginLeft: 6, background: C.green, color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 9.5, fontWeight: 700 }}>MÁS BARATO</span>}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: C.navy }}>
+                        {"$" + p.costoTotal.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
         <button onClick={calcular} style={{ ...btn(C.cyan, true), marginTop: 16 }}>
           Calcular imposición →
         </button>
@@ -1996,7 +2403,15 @@ function Calculadora({ onCalcDone, cotizacion }) {
               {[
                 ["Seleccionado", best?.sheet.label ?? "—"],
                 ["Pzas/pliego",  best?.result.piecesPerSheet ?? "—"],
+                ["Pliegos producción", bestNeto?.toLocaleString("es-MX") ?? "—"],
+                ["Pliegos merma", bestMerma != null
+                  ? "+" + bestMerma.toLocaleString("es-MX") + (results.mermaPliegosFijos != null ? " fijos" : " · " + results.merma + "%")
+                  : "—"],
                 ["Pliegos totales", bestTotal?.toLocaleString("es-MX") ?? "—"],
+                ...(papelDelSeleccionado ? [
+                  ["$ / pliego", "$" + papelDelSeleccionado.unitario.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })],
+                  ["Total papel", "$" + papelDelSeleccionado.costoTotal.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })],
+                ] : []),
                 ...(results.machine ? [["Máquina", results.machine.nombre]] : []),
                 ...(results.extW && results.extH ? [["Extendido", results.extW + "×" + results.extH + " cm"]] : []),
               ].map(([l, v]) => (
@@ -2007,9 +2422,21 @@ function Calculadora({ onCalcDone, cotizacion }) {
               ))}
             </div>
             {selectedSheetLabel && selectedSheetLabel !== autoB?.sheet.label && (
-              <div style={{ background: "rgba(255,255,255,0.1)", borderRadius: 6, padding: "5px 10px", fontSize: 11, color: "#8BBDD6", display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ background: "rgba(255,255,255,0.1)", borderRadius: 6, padding: "5px 10px", fontSize: 11, color: "#8BBDD6", display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                 <span>⭐ Más eficiente: <strong style={{ color: "#fff" }}>{autoB?.sheet.label}</strong> ({autoB?.result.piecesPerSheet} pzas/pliego)</span>
                 <button onClick={() => selectSheet(autoB)} style={{ background: "none", border: "1px solid #8BBDD6", borderRadius: 5, padding: "2px 8px", fontSize: 10, color: "#8BBDD6", cursor: "pointer", fontWeight: 700 }}>
+                  Usar ésta
+                </button>
+              </div>
+            )}
+            {labelMasBarato && labelMasBarato !== selectedSheetLabel && (
+              <div style={{ background: "rgba(46,125,50,0.25)", border: "1px solid rgba(165,214,167,0.5)", borderRadius: 6, padding: "6px 10px", fontSize: 11, color: "#C8E6C9", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span>
+                  💰 <strong style={{ color: "#fff" }}>{labelMasBarato}</strong> sale más barato en papel
+                  {labelMasBarato !== autoB?.sheet.label && <span> — aunque rinda menos piezas por pliego</span>}
+                </span>
+                <button onClick={() => { const r = results.raw.find(x => x.sheet.label === labelMasBarato); if (r) selectSheet(r); }}
+                  style={{ background: "none", border: "1px solid #A5D6A7", borderRadius: 5, padding: "2px 8px", fontSize: 10, color: "#C8E6C9", cursor: "pointer", fontWeight: 700 }}>
                   Usar ésta
                 </button>
               </div>
@@ -2019,12 +2446,20 @@ function Calculadora({ onCalcDone, cotizacion }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
             {results.raw.map((row) => (
               <SheetResult key={row.sheet.label} sheet={row.sheet} result={row.result}
-                qty={results.qty} mermaPercent={results.merma}
+                qty={results.qty} mermaPercent={results.merma} mermaPliegosFijos={results.mermaPliegosFijos}
                 pricePerKg={results.pricePerKg} gramaje={results.gramaje}
                 compatible={row.compatible} showIncompatible={showIncompatible}
                 isSelected={row.sheet.label === selectedSheetLabel}
                 isBest={row.sheet.label === autoB?.sheet.label}
-                onSelect={() => selectSheet(row)} impresores={impresores} />
+                onSelect={() => selectSheet(row)} impresores={impresores}
+                papelInfo={papelServicioId ? (() => {
+                  const neto = row.result.piecesPerSheet > 0 ? Math.ceil(results.qty / row.result.piecesPerSheet) : null;
+                  const tot = totalConMermaDe(neto, results.merma, results.mermaPliegosFijos);
+                  if (tot == null) return null;
+                  const mejor = mejorPrecioPliego(row.sheet.w, row.sheet.h, tot);
+                  return mejor ? { ...mejor, pliegosTotales: tot, costoPorPieza: mejor.costoTotal / results.qty } : { sinPrecio: true };
+                })() : null}
+                esMasBarato={papelServicioId && row.sheet.label === labelMasBarato} />
             ))}
           </div>
 
@@ -2057,7 +2492,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const sel = calcData?.selectedSheet;
   const mermaPct = parseFloat(calcData?.merma) || 0;
   const pliegosCalc = sel && qtyDefault
-    ? Math.ceil(Math.ceil(qtyDefault / sel.piecesPerSheet) * (1 + mermaPct / 100))
+    ? totalConMermaDe(Math.ceil(qtyDefault / sel.piecesPerSheet), mermaPct, calcData?.mermaPliegosFijos)
     : 0;
 
   const [qtyManual, setQtyManual] = useState("");
@@ -2066,8 +2501,19 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const pliegosBase = parseInt(pliegosManual) > 0 ? parseInt(pliegosManual) : pliegosCalc;
 
   // Selecciones de la cotización
-  const [papelServicioId, setPapelServicioId] = useState("");
-  const [papelProvId, setPapelProvId] = useState("");
+  // Material (papel o sustrato) — ya no se elige aquí, viene de 📐 Pliegos
+  // (comparación de medida/precio para papel, selector simple para sustratos
+  // especiales). Si ahí no se eligió nada, queda vacío y ese costo no se suma.
+  const [papelServicioId, setPapelServicioId] = useState(() => calcData?.papelServicioId || "");
+  const [papelProvId, setPapelProvId] = useState(() => calcData?.papelProvId || "");
+  const [sustratoServicioId, setSustratoServicioId] = useState(() => calcData?.sustratoServicioId || "");
+  const [sustratoProvId, setSustratoProvId] = useState(() => calcData?.sustratoProvId || "");
+  useEffect(() => {
+    setPapelServicioId(calcData?.papelServicioId || "");
+    setPapelProvId(calcData?.papelProvId || "");
+    setSustratoServicioId(calcData?.sustratoServicioId || "");
+    setSustratoProvId(calcData?.sustratoProvId || "");
+  }, [calcData?.papelServicioId, calcData?.papelProvId, calcData?.sustratoServicioId, calcData?.sustratoProvId]);
   const [impServicioId, setImpServicioId] = useState("");
   const [impProvId, setImpProvId] = useState("");
   const [tintasFrente, setTintasFrente] = useState(() => cotizacion?.tintas_frente || "");
@@ -2246,6 +2692,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
 
   const costoPapel = papelProvId && papelServicioId && pliegos
     ? (costoDe(papelProvId, papelServicioId, pliegos) || 0) : 0;
+  const costoSustrato = sustratoProvId && sustratoServicioId && pliegos
+    ? (costoDe(sustratoProvId, sustratoServicioId, pliegos) || 0) : 0;
   const costoImp = impProvId && impServicioId && pliegos
     ? (costoDe(impProvId, impServicioId, pliegos, coloresManual != null ? coloresManual : undefined) || 0) : 0;
   const costoColorExtra = colorExtraProvId && colorExtraServicioId && pliegos
@@ -2257,12 +2705,13 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const costoExtras = parseFloat(extras) || 0;
   const serviciosFijos = catalogo.filter(s => s.unidad_precio === "fijo" && s.categoria !== "suaje");
   const costoFijosSeleccionados = Object.entries(costosFijosSel).reduce((sum, [sid, pid]) => sum + (costoDe(pid, sid, 0) || 0), 0);
-  const subtotalAntesDeUrgencia = costoPapel + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
+  const subtotalAntesDeUrgencia = costoPapel + costoSustrato + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
   const costoUrgencia = subtotalAntesDeUrgencia * ((parseFloat(cargoUrgenciaPct) || 0) / 100);
   const costoTotal = subtotalAntesDeUrgencia + costoUrgencia;
 
   const desgloseArr = [
     papelServicioId && { label: "Papel · " + nombreServicio(papelServicioId), prov: nombreProv(papelProvId), v: costoPapel },
+    sustratoServicioId && { label: "Sustrato · " + nombreServicio(sustratoServicioId), prov: nombreProv(sustratoProvId), v: costoSustrato },
     impServicioId && { label: "Impresión · " + nombreServicio(impServicioId), prov: nombreProv(impProvId), v: costoImp },
     colorExtraServicioId && { label: "Pantone · " + nombreServicio(colorExtraServicioId), prov: nombreProv(colorExtraProvId), v: costoColorExtra },
     barnizServicioId && { label: "Barniz máquina · " + nombreServicio(barnizServicioId), prov: nombreProv(barnizProvId), v: costoBarniz },
@@ -2311,6 +2760,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
     const tCap = tiempoDe(papelProvId, papelServicioId, pliegos);
     pasosCronograma.push({ key: "papel", nombre: "Papel — " + nombreServicio(papelServicioId), horasDefault: tCap ?? 24, editable: tCap == null });
   }
+  if (sustratoServicioId) {
+    const tCap = tiempoDe(sustratoProvId, sustratoServicioId, pliegos);
+    pasosCronograma.push({ key: "sustrato", nombre: "Sustrato — " + nombreServicio(sustratoServicioId), horasDefault: tCap ?? 24, editable: tCap == null });
+  }
   if (impServicioId) pasosCronograma.push({ key: "impresion", nombre: "Impresión — " + nombreServicio(impServicioId), horasDefault: horasEstimadas ?? 4, editable: horasEstimadas == null });
   if (colorExtraServicioId) {
     const tCap = tiempoDe(colorExtraProvId, colorExtraServicioId, pliegos);
@@ -2352,7 +2805,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
 
   // Avisa hacia arriba (App → Enviar solicitud) qué proveedores reales quedaron
   // elegidos en esta cotización, con su contacto, para poder mandarles el mensaje.
-  const idsProveedoresUsados = [papelProvId, impProvId, colorExtraProvId, barnizProvId,
+  const idsProveedoresUsados = [papelProvId, sustratoProvId, impProvId, colorExtraProvId, barnizProvId,
     ...acabados.map(a => a.provId), ...Object.values(costosFijosSel)]
     .filter(Boolean).map(id => separarProvMaquina(id).proveedorId);
   const idsUnicos = [...new Set(idsProveedoresUsados)].join(",");
@@ -2377,6 +2830,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
       horasEstimadas != null ? ("Tiempo estimado de impresión: " + formatoHoras(horasEstimadas) + " (" + maquinaImp.nombre + ")") : null,
       "",
       papelServicioId ? ("Papel — " + nombreServicio(papelServicioId) + " (" + nombreProv(papelProvId) + "): " + money(costoPapel)) : null,
+      sustratoServicioId ? ("Sustrato — " + nombreServicio(sustratoServicioId) + " (" + nombreProv(sustratoProvId) + "): " + money(costoSustrato)) : null,
       impServicioId ? ("Impresión — " + nombreServicio(impServicioId) + " (" + nombreProv(impProvId) + "): " + money(costoImp)) : null,
       colorExtraServicioId ? ("Pantone — " + nombreServicio(colorExtraServicioId) + " (" + nombreProv(colorExtraProvId) + "): " + money(costoColorExtra)) : null,
       barnizServicioId ? ("Barniz máquina — " + nombreServicio(barnizServicioId) + " (" + nombreProv(barnizProvId) + "): " + money(costoBarniz)) : null,
@@ -2397,7 +2851,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   };
 
   // ── Sub-UI: selector servicio + proveedor con comparación de precios ──
-  const SelectorCosto = ({ titulo, cats, patronNombre, servicioId, provId, setServ, setProv, costo, unidadNota, cantidadReal }) => {
+  const SelectorCosto = ({ titulo, cats, patronNombre, servicioId, provId, setServ, setProv, costo, unidadNota, cantidadReal, sinCard }) => {
     const rango = fechaInicio && fechaEntregaEstimada
       ? { inicio: new Date(fechaInicio + "T08:00:00").getTime(), fin: fechaEntregaEstimada.getTime() } : null;
     const provs = servicioId ? provsConPrecio(servicioId, cantidadReal, rango) : [];
@@ -2410,13 +2864,14 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
       : [];
     const elegirYlimpiar = (sid) => { elegirServicio(sid, setServ, setProv, cantidadReal); setBusquedaServ(""); };
 
-    return (
-      <div style={{ ...cardStyle, marginBottom: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>{titulo}</div>
-          {costo > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costo)}</div>}
-        </div>
-
+    const cuerpo = (
+      <>
+        {!sinCard && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy }}>{titulo}</div>
+            {costo > 0 && <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(costo)}</div>}
+          </div>
+        )}
         {opciones.length > 6 && (
           <div style={{ position: "relative", marginBottom: 8 }}>
             <input value={busquedaServ} onChange={e => setBusquedaServ(e.target.value)}
@@ -2526,8 +2981,11 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
             })}
           </div>
         )}
-      </div>
+      </>
     );
+
+    if (sinCard) return cuerpo;
+    return <div style={{ ...cardStyle, marginBottom: 12 }}>{cuerpo}</div>;
   };
 
   if (loading) return <div style={{ color: C.muted, fontSize: 13, padding: 20 }}>Cargando proveedores y catálogo…</div>;
@@ -2616,10 +3074,25 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
         )}
       </div>
 
-      <SelectorCosto titulo="Papel" cats={["papel", "magnetico", "sustrato_rigido"]}
-        servicioId={papelServicioId} provId={papelProvId}
-        setServ={setPapelServicioId} setProv={setPapelProvId}
-        costo={costoPapel} unidadNota="(total)" cantidadReal={pliegos} />
+      {(papelServicioId || sustratoServicioId) && (
+        <div style={{ ...cardStyle, marginBottom: 12, background: "#EAF4FB", border: `1.5px solid ${C.cyan}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
+              {papelServicioId ? "📄 " + nombreServicio(papelServicioId) : "🧲 " + nombreServicio(sustratoServicioId)}
+              <span style={{ color: C.muted, fontWeight: 400, fontSize: 11.5 }}>
+                {" · "}{nombreProv(papelServicioId ? papelProvId : sustratoProvId)}
+              </span>
+            </div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: C.navy }}>{money(papelServicioId ? costoPapel : costoSustrato)}</div>
+          </div>
+          <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>Elegido en 📐 Pliegos — cámbialo ahí si lo necesitas.</div>
+        </div>
+      )}
+      {!papelServicioId && !sustratoServicioId && (
+        <div style={{ fontSize: 11.5, color: C.coral, marginBottom: 12 }}>
+          Todavía no elegiste papel ni sustrato en 📐 Pliegos — ve para allá y captúralo, si no este costo no se va a sumar.
+        </div>
+      )}
 
       <SelectorCosto titulo="Impresión" cats={["impresion"]}
         servicioId={impServicioId} provId={impProvId}
