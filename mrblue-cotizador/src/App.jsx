@@ -495,6 +495,16 @@ async function crearServicioCatalogo({ nombre, categoria, unidad_precio }) {
   return data;
 }
 
+// Cambia la unidad de precio de un servicio ya existente en el catálogo.
+// Ojo: afecta a TODOS los proveedores que usen ese servicio, porque la unidad
+// vive en el catálogo, no en cada tarifa.
+async function actualizarUnidadServicio(servicioId, unidad_precio) {
+  const { error } = await supabase
+    .from("servicios_catalogo").update({ unidad_precio }).eq("id", servicioId);
+  if (error) { console.error(error); return false; }
+  return true;
+}
+
 // Paleta que se va asignando en orden a cada categoría que aparezca en el catálogo,
 // para que categorías nuevas (agregadas en Supabase) también tengan color sin tocar código.
 const PALETA_CATEGORIAS = [C.cyan, C.navy, "#7C4DFF", C.coral, C.green, C.amber, C.purple];
@@ -814,18 +824,30 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
     reader.onload = (ev) => {
       const filas = parseCsvPrecios(String(ev.target.result || ""));
       let matched = 0;
+      const vistos = [];
       setPrecios(prev => {
         const next = { ...prev };
-        filas.forEach(({ nombre, precio }) => {
-          const s = catalogo.find(c => c.nombre.trim().toLowerCase() === nombre.trim().toLowerCase());
+        filas.forEach(({ nombre, precio, ancho, alto, gramaje, puntos, caras }) => {
+          const s = catalogo.find(c => normalizarTexto(c.nombre) === normalizarTexto(nombre));
           if (!s) return;
           matched++;
+          vistos.push(s.id);
           const actuales = next[s.id]?.escalones || [nuevoEscalon()];
+          // Solo pisa los campos que sí venían en el CSV — lo que dejaste vacío
+          // en Excel conserva lo que ya estaba capturado.
           const primero = { ...actuales[0], precio };
+          if (ancho && alto) { primero.ancho = ancho; primero.alto = alto; }
+          if (gramaje) primero.gramaje = gramaje;
+          if (puntos)  primero.puntos  = puntos;
+          if (caras)   primero.caras   = caras;
           next[s.id] = { escalones: [primero, ...actuales.slice(1)], historial: next[s.id]?.historial || [] };
         });
         return next;
       });
+      if (vistos.length) {
+        setIdsVisibles(prev => { const s = new Set(prev); vistos.forEach(id => s.add(id)); return s; });
+        setSucio(true);
+      }
       setImportInfo({ matched, total: filas.length });
       setTimeout(() => setImportInfo(null), 6000);
     };
@@ -859,6 +881,27 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
       }
       setCatalogo(prev => [...prev, servicio].sort((a, b) =>
         a.categoria === b.categoria ? a.nombre.localeCompare(b.nombre) : a.categoria.localeCompare(b.categoria)));
+    } else if (servicio.unidad_precio !== formUnidad) {
+      // El proceso ya existía con otra unidad. La unidad vive en el catálogo, así
+      // que cambiarla afecta a todos los proveedores — mejor preguntar.
+      const etiquetas = { por_millar: "$ / millar", por_pieza: "$ / pieza", unidad: "$ / unidad", por_kg: "$ / kg", por_m2: "$ / m²", fijo: "$ (costo único)" };
+      const cambiar = window.confirm(
+        `"${servicio.nombre}" ya existe en el catálogo con unidad ${etiquetas[servicio.unidad_precio] || servicio.unidad_precio}, ` +
+        `y elegiste ${etiquetas[formUnidad] || formUnidad}.\n\n` +
+        `Aceptar = cambiar la unidad a ${etiquetas[formUnidad] || formUnidad} (afecta a TODOS los proveedores que usen este proceso).\n` +
+        `Cancelar = dejarla como está y capturar el precio con la unidad actual.`
+      );
+      if (cambiar) {
+        const ok = await actualizarUnidadServicio(servicio.id, formUnidad);
+        if (ok) {
+          servicio = { ...servicio, unidad_precio: formUnidad };
+          setCatalogo(prev => prev.map(c => c.id === servicio.id ? { ...c, unidad_precio: formUnidad } : c));
+        } else {
+          setFormError("No se pudo cambiar la unidad. Revisa los permisos de servicios_catalogo.");
+          setGuardandoProceso(false);
+          return;
+        }
+      }
     }
 
     setPrecios(prev => {
@@ -893,10 +936,10 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
 
   return (
     <div style={{ marginTop: 14 }}>
-      {/* Importar CSV con nombre,precio — llena los campos de abajo sin guardar todavía */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+      {/* Importar CSV — llena los campos de abajo sin guardar todavía */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
         <label style={{ ...btn(C.muted), background: "none", color: C.muted, border: `1.5px solid ${C.border}`, cursor: "pointer" }}>
-          📥 Importar CSV (nombre,precio)
+          📥 Importar CSV
           <input type="file" accept=".csv" onChange={onImportCsv} style={{ display: "none" }} />
         </label>
         {importInfo && (
@@ -904,6 +947,10 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
             {importInfo.matched} de {importInfo.total} filas coincidieron con el catálogo{importInfo.matched < importInfo.total ? " (revisa nombres exactos para las demás)" : ""}
           </span>
         )}
+      </div>
+      <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 12 }}>
+        Columnas: <b>nombre,precio</b> — y para papel puedes agregar <b>tamaño,gramaje,puntos,caras</b> (ej. <code>Couché 2 caras 150,410,90x75,150,,2</code>).
+        Solo aplica a procesos que ya existen en el catálogo; deja vacía cualquier columna que no quieras tocar.
       </div>
 
       {/* Agregar proceso manualmente (nombre, tiempo y precio) */}
@@ -1364,17 +1411,78 @@ async function deleteArchivoProveedor(archivoId, url) {
 
 // Parser CSV simple: espera columnas "nombre,precio" (con encabezado o sin él).
 // No requiere librerías externas — suficiente para listas simples exportadas de Excel.
+// Parser CSV: acepta el formato corto "nombre,precio" y el extendido
+// "nombre,precio,tamaño,gramaje,puntos,caras" (las columnas extra son opcionales
+// y solo aplican a papeles). El tamaño se escribe "90x75" y se parte en ancho/alto.
+// Soporta comillas (para precios tipo "1,250.50") y separador , o ; — Excel en
+// español suele exportar con punto y coma.
+function partirLineaCsv(linea, sep) {
+  const out = [];
+  let actual = "", enComillas = false;
+  for (let i = 0; i < linea.length; i++) {
+    const ch = linea[i];
+    if (ch === '"') {
+      if (enComillas && linea[i + 1] === '"') { actual += '"'; i++; }  // comilla escapada
+      else enComillas = !enComillas;
+    } else if (ch === sep && !enComillas) {
+      out.push(actual.trim()); actual = "";
+    } else actual += ch;
+  }
+  out.push(actual.trim());
+  return out;
+}
+
+// Convierte "1,250.50" o "1.250,50" a número. Si hay coma y punto, el último
+// separador que aparece es el decimal; si solo hay uno, se decide por posición.
+function numeroDesdeTexto(txt) {
+  let s = String(txt || "").replace(/[^0-9.,-]/g, "").trim();
+  if (!s) return NaN;
+  const ultimaComa = s.lastIndexOf(","), ultimoPunto = s.lastIndexOf(".");
+  if (ultimaComa >= 0 && ultimoPunto >= 0) {
+    // El de más a la derecha es el decimal; el otro es separador de miles.
+    if (ultimaComa > ultimoPunto) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (ultimaComa >= 0) {
+    // Una sola coma: decimal si deja 1-2 dígitos a la derecha, si no son miles.
+    s = /,\d{1,2}$/.test(s) ? s.replace(",", ".") : s.replace(/,/g, "");
+  }
+  return parseFloat(s);
+}
+
 function parseCsvPrecios(text) {
   const lineas = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lineas.length) return [];
+  // Detecta el separador por la primera línea: gana el que aparezca más veces.
+  const sep = (lineas[0].split(";").length > lineas[0].split(",").length) ? ";" : ",";
+
   const filas = [];
   for (let linea of lineas) {
-    const cols = linea.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+    const cols = partirLineaCsv(linea, sep);
     if (cols.length < 2) continue;
     const nombre = cols[0];
-    const precio = parseFloat(cols[1].replace(/[^0-9.]/g, ""));
+    const precio = numeroDesdeTexto(cols[1]);
     if (!nombre || Number.isNaN(precio)) continue;
-    if (/^(nombre|servicio|producto)$/i.test(nombre)) continue; // salta encabezado
-    filas.push({ nombre, precio });
+    if (/^(nombre|servicio|producto|papel)$/i.test(nombre)) continue; // salta encabezado
+
+    // ── Columnas opcionales (papel) ──
+    const m = (cols[2] || "").match(/^\s*(\d+(?:[.,]\d+)?)\s*[xX×]\s*(\d+(?:[.,]\d+)?)\s*$/);
+    const numCol = (i) => {
+      const v = numeroDesdeTexto(cols[i]);
+      return Number.isFinite(v) ? String(v) : "";
+    };
+    // "caras": acepta 1/2 o texto ("2 caras", "una cara", "doble"). Se mira el
+    // primer dígito suelto para no confundirse con nombres tipo "12 puntos".
+    const carasRaw = (cols[5] || "").toLowerCase().trim();
+    const digito = carasRaw.match(/(?:^|\s)([12])(?:\s|$|\s*caras?)/);
+    const caras = digito ? digito[1]
+      : /\b(dos|doble|ambas)\b/.test(carasRaw) ? "2"
+      : /\b(una|un|sencilla?)\b/.test(carasRaw) ? "1" : "";
+
+    filas.push({
+      nombre, precio,
+      ancho: m ? m[1].replace(",", ".") : "", alto: m ? m[2].replace(",", ".") : "",
+      gramaje: numCol(3), puntos: numCol(4), caras,
+    });
   }
   return filas;
 }
