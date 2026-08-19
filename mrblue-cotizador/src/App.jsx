@@ -4547,8 +4547,10 @@ const VARIABLES = [
   { key: "{cantidad}",         label: "Cantidad",            ejemplo: "1,000 piezas" },
   { key: "{pliego}",           label: "Tamaño de pliego",    ejemplo: "70×95 cm" },
   { key: "{pliegos_totales}",  label: "Pliegos totales",     ejemplo: "1,053" },
+  { key: "{pliegos_produccion}", label: "Pliegos de producción", ejemplo: "1,000" },
+  { key: "{pliegos_merma}",    label: "Pliegos de merma",    ejemplo: "53" },
   { key: "{gramaje}",          label: "Gramaje",             ejemplo: "300 g/m²" },
-  { key: "{merma}",            label: "% Merma",             ejemplo: "5%" },
+  { key: "{merma}",            label: "Merma (% y pliegos)", ejemplo: "5% (53 pliegos)" },
   { key: "{tintas}",           label: "Tintas frente/vuelta",ejemplo: "4/4" },
   { key: "{tintas_frente}",    label: "Tintas frente",       ejemplo: "4" },
   { key: "{tintas_vuelta}",    label: "Tintas vuelta",       ejemplo: "4" },
@@ -4569,7 +4571,8 @@ Medida final: {medida_final}
 Medida extendida: {medida_extendida}
 Cantidad: {cantidad}
 Tamaño de pliego: {pliego}
-Pliegos totales (incluye {merma} merma): {pliegos_totales}
+Pliegos totales: {pliegos_totales}
+Merma incluida: {merma}
 Gramaje del sustrato: {gramaje}
 
 Favor de cotizar incluyendo: precio por millar o pieza, tiempo de entrega y si el precio incluye barniz UV o plastificado.
@@ -4952,8 +4955,12 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const piezasPorPliego = sel?.piecesPerSheet
     ?? (calcData?.raw?.find(r => r.compatible !== false) ?? calcData?.raw?.[0])?.result.piecesPerSheet
     ?? 0;
-  const bestTotal = piezasPorPliego > 0 && calcData
-    ? Math.ceil(Math.ceil(calcData.qty / piezasPorPliego) * (1 + calcData.merma / 100)) : null;
+  // Netos = los que salen del tiro sin merma. Totales = con merma aplicada.
+  // Usa el mismo helper que Pliegos para respetar el modo "pliegos fijos".
+  const bestNeto = piezasPorPliego > 0 && calcData
+    ? Math.ceil(calcData.qty / piezasPorPliego) : null;
+  const bestTotal = totalConMermaDe(bestNeto, calcData?.merma, calcData?.mermaPliegosFijos);
+  const bestMerma = bestTotal != null && bestNeto != null ? bestTotal - bestNeto : null;
 
   const buildVars = (p) => {
     const tf = cotizacion?.tintas_frente ?? "";
@@ -4976,7 +4983,15 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
       pliego:           bestLabel,
       pliegos_totales:  bestTotal ? bestTotal.toLocaleString("es-MX") : "—",
       gramaje:          calcData?.papelNombre ? calcData.papelNombre : (calcData ? calcData.gramaje + " g/m2" : "—"),
-      merma:            calcData ? calcData.merma + "%" : "—",
+      merma:            calcData
+        ? (bestMerma != null
+            ? (calcData.mermaPliegosFijos != null
+                ? `${bestMerma.toLocaleString("es-MX")} pliegos`
+                : `${calcData.merma}% (${bestMerma.toLocaleString("es-MX")} pliegos)`)
+            : calcData.merma + "%")
+        : "—",
+      pliegos_produccion: bestNeto != null ? bestNeto.toLocaleString("es-MX") : "—",
+      pliegos_merma:      bestMerma != null ? bestMerma.toLocaleString("es-MX") : "—",
       tintas,
       tintas_frente:    tf !== "" ? String(tf) : "—",
       tintas_vuelta:    tv !== "" ? String(tv) : "—",
