@@ -430,6 +430,7 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
                 {papelInfo.gramaje ? ` · ${papelInfo.gramaje} g/m²` : ""}
                 {papelInfo.puntos ? ` · ${papelInfo.puntos} pts` : ""}
                 {papelInfo.caras ? ` · ${papelInfo.caras} cara${papelInfo.caras === "2" || papelInfo.caras === 2 ? "s" : ""}` : ""}
+                {papelInfo.acabado ? ` · ${papelInfo.acabado}` : ""}
               </div>
             </div>
           )}
@@ -537,7 +538,7 @@ function colorForCategoria(categorias, cat) {
   return idx >= 0 ? PALETA_CATEGORIAS[idx % PALETA_CATEGORIAS.length] : C.muted;
 }
 
-const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "", ancho: "", alto: "", gramaje: "", puntos: "", caras: "", marca: "" });
+const nuevoEscalon = () => ({ id: null, tiraje_min: "", tiraje_max: "", precio: "", tiempo_horas: "", notas: "", ancho: "", alto: "", gramaje: "", puntos: "", caras: "", marca: "", acabado: "" });
 
 // Medidas de pliego más comunes en el mercado mexicano, para el datalist de "Tamaño".
 const TAMANOS_PAPEL_COMUNES = ["90x75", "70x100", "65x90", "60x90", "76x112", "70x95", "63.5x88"];
@@ -606,7 +607,7 @@ function costoServicioPorCantidad(unidad_precio, precio, qty, areaM2PorUnidad) {
 // Compara dos listas de escalones ignorando el campo `id` (que solo existe en los ya guardados).
 function escalonesIguales(a, b) {
   const norm = arr => (arr || [])
-    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}|${e.ancho ?? ""}|${e.alto ?? ""}|${e.gramaje ?? ""}|${e.puntos ?? ""}|${e.caras ?? ""}|${e.marca ?? ""}`)
+    .map(e => `${e.tiraje_min ?? ""}|${e.tiraje_max ?? ""}|${e.precio ?? ""}|${e.tiempo_horas ?? ""}|${e.notas ?? ""}|${e.ancho ?? ""}|${e.alto ?? ""}|${e.gramaje ?? ""}|${e.puntos ?? ""}|${e.caras ?? ""}|${e.marca ?? ""}|${e.acabado ?? ""}`)
     .sort();
   const na = norm(a), nb = norm(b);
   return na.length === nb.length && na.every((v, i) => v === nb[i]);
@@ -732,6 +733,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
   const [formPuntos, setFormPuntos] = useState("");
   const [formCaras, setFormCaras] = useState("");
   const [formMarca, setFormMarca] = useState("");
+  const [formAcabado, setFormAcabado] = useState("");
   const [formError, setFormError] = useState("");
   const [guardandoProceso, setGuardandoProceso] = useState(false);
 
@@ -889,7 +891,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
           escalones: g.filas.map(f => ({
             ...nuevoEscalon(), precio: f.precio,
             ancho: f.ancho, alto: f.alto, gramaje: f.gramaje, puntos: f.puntos, caras: f.caras,
-            marca: f.marca || "",
+            marca: f.marca || "", acabado: f.acabado || "",
           })),
           historial: nextPrecios[s.id]?.historial || [],
         };
@@ -968,7 +970,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
       const nuevoEsc = {
         ...nuevoEscalon(), precio: formPrecio, tiempo_horas: formHoras, notas: formNotas,
         ancho: m ? m[1] : "", alto: m ? m[2] : "",
-        gramaje: formGramaje, puntos: formPuntos, caras: formCaras, marca: formMarca,
+        gramaje: formGramaje, puntos: formPuntos, caras: formCaras, marca: formMarca, acabado: formAcabado,
       };
       return { ...prev, [servicio.id]: { escalones: [nuevoEsc, ...actuales], historial: prev[servicio.id]?.historial || [] } };
     });
@@ -976,7 +978,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
     setSucio(true);
 
     setFormNombre(""); setFormCategoriaNueva(""); setFormPrecio(""); setFormHoras(""); setFormNotas("");
-    setFormTamano(""); setFormGramaje(""); setFormPuntos(""); setFormCaras(""); setFormMarca("");
+    setFormTamano(""); setFormGramaje(""); setFormPuntos(""); setFormCaras(""); setFormMarca(""); setFormAcabado("");
     setMostrandoForm(false);
     setGuardandoProceso(false);
   };
@@ -1011,7 +1013,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
         )}
       </div>
       <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 12 }}>
-        Columnas: <b>nombre,precio</b> — y para papel puedes agregar <b>tamaño,gramaje,puntos,caras,marca</b> (ej. <code>Bond blanco,759,57x87,50,,,Scribe</code>).
+        Columnas: <b>nombre,precio</b> — y para papel puedes agregar <b>tamaño,gramaje,puntos,caras,marca,acabado</b> (ej. <code>Bond blanco,759,57x87,50,,,Scribe,mate</code>).
         Repite el mismo nombre en varios renglones para cargar sus distintas medidas y gramajes; cada renglón se vuelve un precio.
         Si el proceso no existe en el catálogo, se crea{catDefault ? ` en la categoría "${catDefault}"` : ""} con la unidad que tengas elegida arriba.
       </div>
@@ -1070,7 +1072,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
             </div>
 
             {formCategoria === "papel" && (
-              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.3fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.2fr 1fr 1fr 1fr 1.1fr", gap: 8, marginBottom: 8 }}>
                 <div>
                   <label style={labelStyle}>Marca</label>
                   <input value={formMarca} onChange={e => setFormMarca(e.target.value)}
@@ -1101,6 +1103,15 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
                     <option value="">—</option>
                     <option value="1">1 cara</option>
                     <option value="2">2 caras</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Acabado</label>
+                  <select value={formAcabado} onChange={e => setFormAcabado(e.target.value)}
+                    style={{ ...inputStyle, appearance: "none" }}>
+                    <option value="">—</option>
+                    <option value="brillante">Brillante</option>
+                    <option value="mate">Mate</option>
                   </select>
                 </div>
               </div>
@@ -1144,7 +1155,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
         const esFijo = s.unidad_precio === "fijo";
         const esPapel = s.categoria === "papel";
         const colsEscalon = esPapel
-          ? "minmax(88px,1.1fr) 80px 52px 46px 58px minmax(78px,1fr) 48px 32px"
+          ? "minmax(80px,1fr) 74px 48px 44px 52px 74px minmax(74px,0.9fr) 46px 32px"
           : "80px 80px 1fr 70px 32px";
 
         return (
@@ -1196,7 +1207,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
                 padding: "0 12px 4px", fontSize: 10, fontWeight: 700, color: C.muted,
                 textTransform: "uppercase", letterSpacing: "0.06em" }}>
                 {esPapel
-                  ? <><div>Marca</div><div>Tamaño</div><div>Grs/m²</div><div>Puntos</div><div>Caras</div></>
+                  ? <><div>Marca</div><div>Tamaño</div><div>Grs/m²</div><div>Puntos</div><div>Caras</div><div>Acabado</div></>
                   : <><div>Desde</div><div>Hasta</div></>}
                 <div>{unidadLabel[s.unidad_precio] || "$"}</div><div>Horas</div><div />
               </div>
@@ -1245,6 +1256,13 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
                     <option value="">—</option>
                     <option value="1">1 cara</option>
                     <option value="2">2 caras</option>
+                  </select>
+                  <select value={e.acabado} onChange={ev => updateEscalon(claveActiva, idx, "acabado", ev.target.value)}
+                    title="Terminado de la superficie del papel"
+                    style={{ ...inputStyle, fontSize: 12, padding: "6px 4px", appearance: "none" }}>
+                    <option value="">—</option>
+                    <option value="brillante">Brillante</option>
+                    <option value="mate">Mate</option>
                   </select>
                 </>}
                 <div style={{ position: "relative" }}>
@@ -1321,7 +1339,7 @@ async function loadProveedoresDB() {
   const { data: maqs } = await supabase.from("maquinas").select("*");
   const { data: tarifas } = await supabase
     .from("tarifas")
-    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at, ancho, alto, gramaje, puntos, caras, marca")
+    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at, ancho, alto, gramaje, puntos, caras, marca, acabado")
     .order("tiraje_min", { ascending: true, nullsFirst: true });
 
   return (provs || []).map(p => {
@@ -1351,7 +1369,7 @@ async function loadProveedoresDB() {
         precios[clave].escalones.push({
           id: t.id, tiraje_min: t.tiraje_min ?? "", tiraje_max: t.tiraje_max ?? "",
           precio: t.precio, tiempo_horas: t.tiempo_horas ?? "", notas: t.notas_precio || "",
-          ancho: t.ancho ?? "", alto: t.alto ?? "", gramaje: t.gramaje ?? "", puntos: t.puntos ?? "", caras: t.caras != null ? String(t.caras) : "", marca: t.marca || "",
+          ancho: t.ancho ?? "", alto: t.alto ?? "", gramaje: t.gramaje ?? "", puntos: t.puntos ?? "", caras: t.caras != null ? String(t.caras) : "", marca: t.marca || "", acabado: t.acabado || "",
         });
       }
     });
@@ -1556,6 +1574,7 @@ function parseCsvPrecios(text) {
       ancho: m ? m[1].replace(",", ".") : "", alto: m ? m[2].replace(",", ".") : "",
       gramaje: numCol(3), puntos: numCol(4), caras,
       marca: (cols[6] || "").trim(),
+      acabado: /mate/i.test(cols[7] || "") ? "mate" : /brill|gloss/i.test(cols[7] || "") ? "brillante" : "",
     });
   }
   return filas;
@@ -1604,6 +1623,7 @@ async function savePreciosDB(provId, precios, previos) {
         puntos: e.puntos === "" || e.puntos == null ? null : parseFloat(e.puntos),
         caras: e.caras === "" || e.caras == null ? null : parseInt(e.caras),
         marca: e.marca ? String(e.marca).trim() : null,
+        acabado: e.acabado || null,
         activo: true,
       }));
       const { error: eIns } = await supabase.from("tarifas").insert(rows);
@@ -2363,7 +2383,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
           if (!(w > 0 && h > 0 && precio > 0)) return;
           out.push({ w, h, precio, provNombre: p.nombre, provId: p.id,
             tiraje_min: e.tiraje_min, tiraje_max: e.tiraje_max,
-            gramaje: e.gramaje, puntos: e.puntos, caras: e.caras, marca: e.marca });
+            gramaje: e.gramaje, puntos: e.puntos, caras: e.caras, marca: e.marca, acabado: e.acabado });
         });
       });
     });
