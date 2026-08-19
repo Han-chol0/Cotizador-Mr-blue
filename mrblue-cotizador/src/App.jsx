@@ -511,6 +511,25 @@ async function loadServiciosCatalogo() {
 // proceso" de la ficha de un proveedor). Así queda disponible de inmediato para
 // todos los proveedores y para la selección automática en 💵 Cotizar.
 async function crearServicioCatalogo({ nombre, categoria, unidad_precio }) {
+  // El proceso puede existir ya pero dado de baja (activo = false). En ese caso
+  // el INSERT falla por el nombre repetido y parecería que "no se pudo crear",
+  // así que primero se busca y, si aparece, se reactiva.
+  const { data: existentes } = await supabase
+    .from("servicios_catalogo")
+    .select("id, nombre, categoria, unidad_precio, activo")
+    .ilike("nombre", nombre);
+  const previo = (existentes || []).find(s => normalizarTexto(s.nombre) === normalizarTexto(nombre));
+  if (previo) {
+    const { data, error } = await supabase
+      .from("servicios_catalogo")
+      .update({ activo: true, categoria, unidad_precio })
+      .eq("id", previo.id)
+      .select("id, nombre, categoria, unidad_precio")
+      .single();
+    if (error) { console.error("No se pudo reactivar el proceso:", error); return null; }
+    return data;
+  }
+
   const { data, error } = await supabase
     .from("servicios_catalogo")
     .insert({ nombre, categoria, unidad_precio, activo: true })
@@ -872,6 +891,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
       )) { e.target.value = ""; return; }
 
       let creados = 0, actualizados = 0, sinCategoria = 0, escalones = 0;
+      const fallidos = [];
       const nuevosCat = [];
       const nextPrecios = { ...precios };
       const visibles = [];
@@ -880,9 +900,9 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
         let s = catalogo.find(c => normalizarTexto(c.nombre) === normalizarTexto(g.nombre))
              || nuevosCat.find(c => normalizarTexto(c.nombre) === normalizarTexto(g.nombre));
         if (!s) {
-          if (!categoriaNueva) { sinCategoria++; continue; }
+          if (!categoriaNueva) { sinCategoria++; fallidos.push(g.nombre); continue; }
           s = await crearServicioCatalogo({ nombre: g.nombre, categoria: categoriaNueva, unidad_precio: formUnidad });
-          if (!s) { sinCategoria++; continue; }
+          if (!s) { sinCategoria++; fallidos.push(g.nombre); continue; }
           nuevosCat.push(s);
           creados++;
         } else actualizados++;
@@ -908,7 +928,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
         setIdsVisibles(prev => { const s = new Set(prev); visibles.forEach(id => s.add(id)); return s; });
         setSucio(true);
       }
-      setImportInfo({ creados, actualizados, escalones, sinCategoria, total: filas.length });
+      setImportInfo({ creados, actualizados, escalones, sinCategoria, fallidos, total: filas.length });
       setTimeout(() => setImportInfo(null), 12000);
     };
     reader.readAsText(file);
@@ -1007,7 +1027,7 @@ function FichaPrecios({ prov, onSave, soloCats, excluirCats, etiqueta, catDefaul
             {importInfo.vacio
               ? "No se leyó ninguna fila válida — revisa que tenga al menos nombre y precio."
               : `${importInfo.escalones} renglones cargados · ${importInfo.creados} proceso${importInfo.creados === 1 ? "" : "s"} nuevo${importInfo.creados === 1 ? "" : "s"} · ${importInfo.actualizados} actualizado${importInfo.actualizados === 1 ? "" : "s"}` +
-                (importInfo.sinCategoria ? ` · ${importInfo.sinCategoria} sin poder crear` : "") +
+                (importInfo.sinCategoria ? ` · ${importInfo.sinCategoria} sin poder crear (${(importInfo.fallidos || []).slice(0, 3).join(", ")}${(importInfo.fallidos || []).length > 3 ? "…" : ""}) — revisa la consola` : "") +
                 " — falta darle Guardar precios"}
           </span>
         )}
