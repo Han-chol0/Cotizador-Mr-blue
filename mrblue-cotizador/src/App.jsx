@@ -2334,6 +2334,34 @@ function Calculadora({ onCalcDone, cotizacion }) {
 
   const servicioPapel = catalogoPapel.find(s => s.id === papelServicioId);
 
+  // Solo tiene sentido ofrecer papeles que algún proveedor sí vende: los que
+  // tienen al menos un renglón de precio con medida capturada. Así no se
+  // arrastran en la búsqueda los del catálogo viejo que ya no se usan.
+  const catalogoPapelConPrecio = useMemo(() => {
+    const conPrecio = new Set();
+    todosProvs.forEach(p => {
+      Object.keys(p.precios || {}).forEach(clave => {
+        const sid = parseClaveEscalon(clave).servicioId;
+        (p.precios[clave].escalones || []).forEach(e => {
+          if (parseFloat(e.ancho) > 0 && parseFloat(e.alto) > 0 && parseFloat(e.precio) > 0) conPrecio.add(sid);
+        });
+      });
+    });
+    return catalogoPapel.filter(s => conPrecio.has(s.id));
+  }, [catalogoPapel, todosProvs]);
+
+  // Igual para sustratos, pero sin exigir medida (se cobran por pieza).
+  const catalogoSustratoConPrecio = useMemo(() => {
+    const conPrecio = new Set();
+    todosProvs.forEach(p => {
+      Object.keys(p.precios || {}).forEach(clave => {
+        const sid = parseClaveEscalon(clave).servicioId;
+        if ((p.precios[clave].escalones || []).some(e => parseFloat(e.precio) > 0)) conPrecio.add(sid);
+      });
+    });
+    return catalogoSustrato.filter(s => conPrecio.has(s.id));
+  }, [catalogoSustrato, todosProvs]);
+
   // Para una medida de pliego y una cantidad, la opción más barata disponible.
   const mejorPrecioPliego = (w, h, pliegosTotales) => {
     const candidatos = opcionesPapel.filter(o => o.w === w && o.h === h);
@@ -2599,19 +2627,27 @@ function Calculadora({ onCalcDone, cotizacion }) {
                 <>
                   <input value={busquedaPapel} onChange={e => setBusquedaPapel(e.target.value)}
                     placeholder='🔍 Buscar papel por nombre (ej. "couché 250")…' style={inputStyle} />
-                  {busquedaPapel.length >= 2 && (
-                    <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: `1.5px solid ${C.border}`, borderRadius: 8 }}>
-                      {catalogoPapel
-                        .filter(s => normalizarTexto(s.nombre).includes(normalizarTexto(busquedaPapel)))
-                        .slice(0, 30)
-                        .map(s => (
+                  {busquedaPapel.length >= 2 && (() => {
+                    const res = catalogoPapelConPrecio
+                      .filter(s => normalizarTexto(s.nombre).includes(normalizarTexto(busquedaPapel)))
+                      .slice(0, 30);
+                    if (!res.length) return (
+                      <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>
+                        Ningún papel con ese nombre tiene precios con medida capturada.
+                        Solo aparecen papeles que algún proveedor sí vende — captúralos en 🏭 Proveedores → 💰 Precio papel.
+                      </div>
+                    );
+                    return (
+                      <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: `1.5px solid ${C.border}`, borderRadius: 8 }}>
+                        {res.map(s => (
                           <div key={s.id} onClick={() => { setPapelServicioId(s.id); setPapelNombre(s.nombre); }}
                             style={{ padding: "7px 12px", fontSize: 12.5, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
                             {s.nombre}
                           </div>
                         ))}
-                    </div>
-                  )}
+                      </div>
+                    );
+                  })()}
                 </>
               )}
               {papelServicioId && opcionesPapel.length === 0 && (
@@ -2642,7 +2678,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
                     placeholder='🔍 Buscar sustrato por nombre (ej. "imán 0.6mm")…' style={inputStyle} />
                   {busquedaSustrato.length >= 2 && (
                     <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: `1.5px solid ${C.border}`, borderRadius: 8 }}>
-                      {catalogoSustrato
+                      {catalogoSustratoConPrecio
                         .filter(s => normalizarTexto(s.nombre).includes(normalizarTexto(busquedaSustrato)))
                         .slice(0, 30)
                         .map(s => (
@@ -4500,6 +4536,8 @@ const TIPOS_SERVICIO = [
   "Otro",
 ];
 
+// Para agregar una variable nueva: métela aquí (sale el botón) y dale valor en
+// buildVars() dentro de EnvioSolicitud. resolveTemplate no hay que tocarlo.
 const VARIABLES = [
   { key: "{saludo}",           label: "Saludo con nombre",   ejemplo: "Buen día Remedios," },
   { key: "{contacto}",         label: "Nombre de contacto",  ejemplo: "Remedios Flores" },
@@ -4511,6 +4549,13 @@ const VARIABLES = [
   { key: "{pliegos_totales}",  label: "Pliegos totales",     ejemplo: "1,053" },
   { key: "{gramaje}",          label: "Gramaje",             ejemplo: "300 g/m²" },
   { key: "{merma}",            label: "% Merma",             ejemplo: "5%" },
+  { key: "{tintas}",           label: "Tintas frente/vuelta",ejemplo: "4/4" },
+  { key: "{tintas_frente}",    label: "Tintas frente",       ejemplo: "4" },
+  { key: "{tintas_vuelta}",    label: "Tintas vuelta",       ejemplo: "4" },
+  { key: "{pantones}",         label: "Pantones",            ejemplo: "Pantone 286 C, 032 C" },
+  { key: "{papel}",            label: "Papel / sustrato",    ejemplo: "Couché 2 caras 300 g" },
+  { key: "{acabados}",         label: "Acabados",            ejemplo: "Suaje, plastificado mate" },
+  { key: "{tiempo_estimado}",  label: "Entrega estimada",    ejemplo: "viernes 3 de julio" },
   { key: "{fecha}",            label: "Fecha",               ejemplo: "28/06/2026" },
 ];
 
@@ -4654,19 +4699,19 @@ const TIPO_PROVEEDOR_A_SERVICIO = {
   "Otro": "Otro",
 };
 
+// Sustituye {variable} por su valor. Es genérico a propósito: para agregar una
+// variable nueva basta con meterla en VARIABLES (para que salga el botón) y en
+// buildVars (para darle valor) — aquí no hay que tocar nada.
+// Si una variable no existe se deja tal cual en el texto, para que un dedazo
+// tipo {cantidd} se note en vez de convertirse en un guión silencioso.
 function resolveTemplate(tpl, vars) {
-  return tpl
-    .replace(/{producto}/g,         vars.producto         || "—")
-    .replace(/{medida_final}/g,      vars.medida_final      || "—")
-    .replace(/{medida_extendida}/g,  vars.medida_extendida  || "—")
-    .replace(/{cantidad}/g,          vars.cantidad          || "—")
-    .replace(/{pliego}/g,            vars.pliego            || "—")
-    .replace(/{pliegos_totales}/g,   vars.pliegos_totales   || "—")
-    .replace(/{gramaje}/g,           vars.gramaje           || "—")
-    .replace(/{merma}/g,             vars.merma             || "—")
-    .replace(/{fecha}/g,             vars.fecha             || "—")
-    .replace(/{saludo}/g,            vars.saludo            || "Buen día,")
-    .replace(/{contacto}/g,          vars.contacto          || "");
+  const porDefecto = { saludo: "Buen día,", contacto: "" };
+  return String(tpl || "").replace(/\{(\w+)\}/g, (match, key) => {
+    const v = vars?.[key];
+    if (v != null && v !== "") return String(v);
+    if (key in porDefecto) return porDefecto[key];
+    return key in (vars || {}) ? "—" : match;
+  });
 }
 
 // ── Módulo: Editor de templates ──────────────────────────────────────────────
@@ -4776,17 +4821,12 @@ function AdminTemplates() {
           Vista previa con datos de ejemplo
         </div>
         <div style={{ background: C.bg, borderRadius: 7, padding: "14px 16px", fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap", color: C.text, fontFamily: "Inter, sans-serif" }}>
-          {resolveTemplate(texto, {
-            producto: "Caja plegadiza 4/0",
-            medida_final: "10×7 cm",
-            medida_extendida: "12×9 cm",
-            cantidad: "1,000 piezas",
-            pliego: "70×95 cm",
-            pliegos_totales: "1,053",
-            gramaje: "300 g/m²",
-            merma: "5%",
-            fecha: new Date().toLocaleDateString("es-MX"),
-          })}
+          {resolveTemplate(texto, Object.fromEntries(
+            VARIABLES.map(v => [
+              v.key.replace(/[{}]/g, ""),
+              v.key === "{fecha}" ? new Date().toLocaleDateString("es-MX") : v.ejemplo,
+            ])
+          ))}
         </div>
       </div>
     </div>
@@ -4915,22 +4955,42 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const bestTotal = piezasPorPliego > 0 && calcData
     ? Math.ceil(Math.ceil(calcData.qty / piezasPorPliego) * (1 + calcData.merma / 100)) : null;
 
-  const buildVars = (p) => ({
-    producto:         producto || "—",
-    medida_final:     calcData ? calcData.pw + "x" + calcData.ph + " cm" : "—",
-    medida_extendida: calcData && calcData.extW ? calcData.extW + "x" + calcData.extH + " cm" : "—",
-    cantidad:         calcData ? calcData.qty.toLocaleString("es-MX") + " piezas" : "—",
-    pliego:           bestLabel,
-    pliegos_totales:  bestTotal ? bestTotal.toLocaleString("es-MX") : "—",
-    gramaje:          calcData?.papelNombre ? calcData.papelNombre : (calcData ? calcData.gramaje + " g/m2" : "—"),
-    merma:            calcData ? calcData.merma + "%" : "—",
-    fecha:            new Date().toLocaleDateString("es-MX"),
-    tiempo_estimado:  tiempoEstimado?.fechaEntregaEstimada
-      ? new Date(tiempoEstimado.fechaEntregaEstimada).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" })
-      : (tiempoEstimado ? formatoHoras(tiempoEstimado.horas) + " (" + tiempoEstimado.maquinaNombre + ")" : "—"),
-    contacto:         p?.contactoNombre || "",
-    saludo:           p?.contactoNombre ? "Buen día " + p.contactoNombre + "," : "Buen día,",
-  });
+  const buildVars = (p) => {
+    const tf = cotizacion?.tintas_frente ?? "";
+    const tv = cotizacion?.tintas_vuelta ?? "";
+    const tintas = (tf !== "" || tv !== "")
+      ? `${tf || 0}/${tv || 0}`
+      : (cotizacion?.num_tintas || "—");
+    // Acabados marcados en la solicitud (vienen como banderas sueltas del mapeo de ClickUp).
+    const ac = cotizacion?.acabados || {};
+    const acabadosLista = Object.entries(ac)
+      .filter(([, v]) => v === true || v === "true")
+      .map(([k]) => k.replace(/_/g, " "))
+      .join(", ");
+
+    return {
+      producto:         producto || "—",
+      medida_final:     calcData ? calcData.pw + "x" + calcData.ph + " cm" : "—",
+      medida_extendida: calcData && calcData.extW ? calcData.extW + "x" + calcData.extH + " cm" : "—",
+      cantidad:         calcData ? calcData.qty.toLocaleString("es-MX") + " piezas" : "—",
+      pliego:           bestLabel,
+      pliegos_totales:  bestTotal ? bestTotal.toLocaleString("es-MX") : "—",
+      gramaje:          calcData?.papelNombre ? calcData.papelNombre : (calcData ? calcData.gramaje + " g/m2" : "—"),
+      merma:            calcData ? calcData.merma + "%" : "—",
+      tintas,
+      tintas_frente:    tf !== "" ? String(tf) : "—",
+      tintas_vuelta:    tv !== "" ? String(tv) : "—",
+      pantones:         cotizacion?.pantones || (cotizacion?.lleva_pantone ? "Sí (por definir)" : "—"),
+      papel:            calcData?.papelNombre || cotizacion?.papel_acabado_gramaje || "—",
+      acabados:         acabadosLista || "—",
+      fecha:            new Date().toLocaleDateString("es-MX"),
+      tiempo_estimado:  tiempoEstimado?.fechaEntregaEstimada
+        ? new Date(tiempoEstimado.fechaEntregaEstimada).toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" })
+        : (tiempoEstimado ? formatoHoras(tiempoEstimado.horas) + " (" + tiempoEstimado.maquinaNombre + ")" : "—"),
+      contacto:         p?.contactoNombre || "",
+      saludo:           p?.contactoNombre ? "Buen día " + p.contactoNombre + "," : "Buen día,",
+    };
+  };
 
   // Mensaje ya adaptado al tipo de servicio de CADA proveedor (auto-detectado por su
   // tipo, o el que hayas elegido a mano en su renglón), con las variables ya resueltas.
