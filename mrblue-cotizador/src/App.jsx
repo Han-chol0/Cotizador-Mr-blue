@@ -1337,10 +1337,18 @@ async function loadProveedoresDB() {
   if (e1) { console.error(e1); return []; }
 
   const { data: maqs } = await supabase.from("maquinas").select("*");
-  const { data: tarifas } = await supabase
-    .from("tarifas")
-    .select("id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at, ancho, alto, gramaje, puntos, caras, marca, acabado")
+  // Si falta alguna columna opcional (migración no corrida), el select falla
+  // entero. Se reintenta con el set mínimo para que la app siga funcionando.
+  const COLS_BASE = "id, proveedor_id, servicio_id, maquina_id, precio, tiempo_horas, notas_precio, tiraje_min, tiraje_max, qty_referencia, activo, created_at";
+  const COLS_PAPEL = ", ancho, alto, gramaje, puntos, caras, marca, acabado";
+  let tarifasRes = await supabase.from("tarifas").select(COLS_BASE + COLS_PAPEL)
     .order("tiraje_min", { ascending: true, nullsFirst: true });
+  if (tarifasRes.error) {
+    console.warn("Faltan columnas de papel en tarifas, leyendo sin ellas:", tarifasRes.error.message);
+    tarifasRes = await supabase.from("tarifas").select(COLS_BASE)
+      .order("tiraje_min", { ascending: true, nullsFirst: true });
+  }
+  const tarifas = tarifasRes.data;
 
   return (provs || []).map(p => {
     const maquinas = (maqs || [])
@@ -1610,23 +1618,44 @@ async function savePreciosDB(provId, precios, previos) {
 
     if (nuevos.length) {
       const { servicioId, maquinaId } = parseClaveEscalon(clave);
-      const rows = nuevos.map(e => ({
+      const base = nuevos.map(e => ({
         proveedor_id: provId, servicio_id: servicioId, maquina_id: maquinaId,
         precio: parseFloat(e.precio),
         tiraje_min: e.tiraje_min === "" ? null : parseFloat(e.tiraje_min),
         tiraje_max: e.tiraje_max === "" ? null : parseFloat(e.tiraje_max),
         tiempo_horas: e.tiempo_horas === "" || e.tiempo_horas == null ? null : parseFloat(e.tiempo_horas),
         notas_precio: e.notas || null,
-        ancho: e.ancho === "" || e.ancho == null ? null : parseFloat(e.ancho),
-        alto: e.alto === "" || e.alto == null ? null : parseFloat(e.alto),
-        gramaje: e.gramaje === "" || e.gramaje == null ? null : parseFloat(e.gramaje),
-        puntos: e.puntos === "" || e.puntos == null ? null : parseFloat(e.puntos),
-        caras: e.caras === "" || e.caras == null ? null : parseInt(e.caras),
-        marca: e.marca ? String(e.marca).trim() : null,
-        acabado: e.acabado || null,
         activo: true,
       }));
-      const { error: eIns } = await supabase.from("tarifas").insert(rows);
+      // Columnas que pueden no existir todavía si falta correr una migración.
+      // Si Supabase rechaza alguna, se reintenta sin ella para no perder el
+      // precio (que es el dato importante) y se avisa qué falta.
+      const opcionales = {
+        ancho:   e => e.ancho === "" || e.ancho == null ? null : parseFloat(e.ancho),
+        alto:    e => e.alto === "" || e.alto == null ? null : parseFloat(e.alto),
+        gramaje: e => e.gramaje === "" || e.gramaje == null ? null : parseFloat(e.gramaje),
+        puntos:  e => e.puntos === "" || e.puntos == null ? null : parseFloat(e.puntos),
+        caras:   e => e.caras === "" || e.caras == null ? null : parseInt(e.caras),
+        marca:   e => e.marca ? String(e.marca).trim() : null,
+        acabado: e => e.acabado || null,
+      };
+      let usables = Object.keys(opcionales);
+      let eIns = null;
+      for (let intento = 0; intento < usables.length + 1; intento++) {
+        const rows = base.map((r, i) => {
+          const extra = {};
+          usables.forEach(k => { extra[k] = opcionales[k](nuevos[i]); });
+          return { ...r, ...extra };
+        });
+        const res = await supabase.from("tarifas").insert(rows);
+        eIns = res.error;
+        if (!eIns) break;
+        // Postgres nombra la columna que falta en el mensaje.
+        const faltante = usables.find(k => (eIns.message || "").includes(k));
+        if (!faltante) break;
+        errores.push(`Falta la columna "${faltante}" en la tabla tarifas — se guardó el precio sin ese dato. Corre: ALTER TABLE tarifas ADD COLUMN IF NOT EXISTS ${faltante} ${faltante === "caras" ? "smallint" : ["marca", "acabado"].includes(faltante) ? "text" : "numeric"};`);
+        usables = usables.filter(k => k !== faltante);
+      }
       if (eIns) { console.error(eIns); errores.push("No se pudieron guardar precios nuevos: " + eIns.message); }
     }
   }
