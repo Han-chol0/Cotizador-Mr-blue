@@ -343,7 +343,7 @@ function Stat({ label, value, bold, accent }) {
 }
 
 // ─── Resultado por tamaño de pliego ──────────────────────────────────────────
-function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect, impresores, papelInfo, esMasBarato }) {
+function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pricePerKg, gramaje, compatible, showIncompatible, isSelected, isBest, onSelect, impresores, papelInfo, esMasBarato, grosorActivo, onElegirGrosor }) {
   if (!compatible && !showIncompatible) return null;
 
   const totalRaw = result.piecesPerSheet > 0 ? Math.ceil(qty / result.piecesPerSheet) : null;
@@ -429,6 +429,29 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
                 {papelInfo.gramaje ? ` · ${papelInfo.gramaje} g/m²` : ""}
                 {papelInfo.puntos ? ` · ${papelInfo.puntos} pts` : ""}
                 {papelInfo.caras ? ` · ${papelInfo.caras} cara${papelInfo.caras === "2" || papelInfo.caras === 2 ? "s" : ""}` : ""}
+              </div>
+            </div>
+          )}
+          {(papelInfo.alternativas || []).length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+                Grosores en esta medida {onElegirGrosor ? "— clic para comparar solo ése" : ""}
+              </div>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                {papelInfo.alternativas.map(a => {
+                  const activo = String(grosorActivo) === a.grosor;
+                  return (
+                    <button key={a.grosor}
+                      onClick={(ev) => { ev.stopPropagation(); onElegirGrosor && onElegirGrosor(activo ? "" : a.grosor); }}
+                      title={`${a.provNombre} · $${a.unitario?.toFixed(2)} por pliego`}
+                      style={{ background: activo ? C.cyan : C.card, color: activo ? "#fff" : C.text,
+                        border: `1.5px solid ${activo ? C.cyan : C.border}`, borderRadius: 7,
+                        padding: "3px 8px", fontSize: 10.5, cursor: onElegirGrosor ? "pointer" : "default", lineHeight: 1.3 }}>
+                      <b>{a.grosor}</b>{a.esPuntos ? " pts" : " g"}
+                      <span style={{ opacity: 0.75 }}> · ${a.costoTotal.toLocaleString("es-MX", { maximumFractionDigits: 0 })}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -2314,7 +2337,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
   }, []);
 
   // Todos los renglones de precio del papel elegido, con su medida y proveedor.
-  const opcionesPapel = useMemo(() => {
+  const opcionesPapelTodas = useMemo(() => {
     if (!papelServicioId) return [];
     const out = [];
     todosProvs.forEach(p => {
@@ -2331,6 +2354,36 @@ function Calculadora({ onCalcDone, cotizacion }) {
     });
     return out;
   }, [papelServicioId, todosProvs]);
+
+  // El grosor define QUÉ papel es, así que pesa más que la medida: comparar
+  // medidas mezclando grosores siempre daría ganador al más delgado.
+  // El campo del formulario sirve para gramaje o para puntos, así que se compara
+  // contra los dos. Se puede sobreescribir con los chips de abajo.
+  const [grosorFiltro, setGrosorFiltro] = useState("");
+  useEffect(() => { setGrosorFiltro(gramaje ? String(parseFloat(gramaje)) : ""); }, [gramaje]);
+
+  const grosoresDisponibles = useMemo(() => {
+    const set = new Set();
+    opcionesPapelTodas.forEach(o => {
+      const g = parseFloat(o.gramaje), p = parseFloat(o.puntos);
+      if (Number.isFinite(g) && g > 0) set.add(String(g));
+      if (Number.isFinite(p) && p > 0) set.add(String(p));
+    });
+    return [...set].sort((a, b) => parseFloat(a) - parseFloat(b));
+  }, [opcionesPapelTodas]);
+
+  const grosorCoincide = (o, val) =>
+    String(parseFloat(o.gramaje)) === val || String(parseFloat(o.puntos)) === val;
+
+  // Si el grosor pedido existe se filtra; si no existe no se deja la pantalla
+  // vacía — se muestran todos y se avisa arriba.
+  const hayDelGrosor = grosorFiltro
+    ? opcionesPapelTodas.some(o => grosorCoincide(o, grosorFiltro)) : false;
+  const opcionesPapel = useMemo(() => (
+    grosorFiltro && hayDelGrosor
+      ? opcionesPapelTodas.filter(o => grosorCoincide(o, grosorFiltro))
+      : opcionesPapelTodas
+  ), [opcionesPapelTodas, grosorFiltro, hayDelGrosor]);
 
   const servicioPapel = catalogoPapel.find(s => s.id === papelServicioId);
 
@@ -2409,6 +2462,28 @@ function Calculadora({ onCalcDone, cotizacion }) {
     setSustratoProvId(proveedoresSustrato[0]?.provId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sustratoServicioId, proveedoresSustrato]);
+
+  // Todos los grosores que existen para una medida, con su costo — para poder
+  // ver dentro de cada tarjeta qué gramajes hay y a cómo sale cada uno.
+  const preciosPorGrosor = (w, h, pliegosTotales) => {
+    const porGrosor = new Map();
+    opcionesPapelTodas.filter(o => o.w === w && o.h === h).forEach(o => {
+      const g = parseFloat(o.gramaje) || parseFloat(o.puntos);
+      if (!Number.isFinite(g) || g <= 0) return;
+      const costo = costoServicioPorCantidad(servicioPapel?.unidad_precio, o.precio, pliegosTotales);
+      if (costo == null) return;
+      const clave = String(g);
+      const previo = porGrosor.get(clave);
+      if (!previo || costo < previo.costoTotal) {
+        porGrosor.set(clave, {
+          grosor: clave, costoTotal: costo, provNombre: o.provNombre,
+          unitario: pliegosTotales > 0 ? costo / pliegosTotales : null,
+          esPuntos: !(parseFloat(o.gramaje) > 0),
+        });
+      }
+    });
+    return [...porGrosor.values()].sort((a, b) => parseFloat(a.grosor) - parseFloat(b.grosor));
+  };
 
   const [results, setResults] = useState(null);
   const [showIncompatible, setShowIncompatible] = useState(false);
@@ -2617,14 +2692,13 @@ function Calculadora({ onCalcDone, cotizacion }) {
                   <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text }}>
                     {servicioPapel?.nombre}
                     <span style={{ color: C.muted, fontWeight: 400, fontSize: 11.5 }}>
-                      {" · "}{opcionesPapel.length} {opcionesPapel.length === 1 ? "medida con precio" : "medidas con precio"}
+                      {" · "}{opcionesPapelTodas.length} {opcionesPapelTodas.length === 1 ? "medida con precio" : "medidas con precio"}
                     </span>
                   </span>
                   <button onClick={() => { setPapelServicioId(""); setBusquedaPapel(""); }}
                     style={{ background: "none", border: "none", color: C.cyan, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Cambiar</button>
                 </div>
-              ) : (
-                <>
+              ) : (                <>
                   <input value={busquedaPapel} onChange={e => setBusquedaPapel(e.target.value)}
                     placeholder='🔍 Buscar papel por nombre (ej. "couché 250")…' style={inputStyle} />
                   {busquedaPapel.length >= 2 && (() => {
@@ -2649,6 +2723,35 @@ function Calculadora({ onCalcDone, cotizacion }) {
                     );
                   })()}
                 </>
+              )}
+              {papelServicioId && grosoresDisponibles.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Grs/m² o puntos
+                    </span>
+                    <button onClick={() => setGrosorFiltro("")}
+                      style={{ background: !grosorFiltro ? C.navy : C.bg, color: !grosorFiltro ? "#fff" : C.muted,
+                        border: `1.5px solid ${!grosorFiltro ? C.navy : C.border}`, borderRadius: 20,
+                        padding: "1px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>todos</button>
+                    {grosoresDisponibles.map(g => (
+                      <button key={g} onClick={() => setGrosorFiltro(g)}
+                        style={{ background: grosorFiltro === g ? C.cyan : C.bg, color: grosorFiltro === g ? "#fff" : C.muted,
+                          border: `1.5px solid ${grosorFiltro === g ? C.cyan : C.border}`, borderRadius: 20,
+                          padding: "1px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer" }}>{g}</button>
+                    ))}
+                  </div>
+                  {grosorFiltro && hayDelGrosor && (
+                    <div style={{ fontSize: 10, color: C.green, marginTop: 4, fontWeight: 700 }}>
+                      Comparando solo medidas de {grosorFiltro} — {opcionesPapel.length} de {opcionesPapelTodas.length} renglones.
+                    </div>
+                  )}
+                  {grosorFiltro && !hayDelGrosor && (
+                    <div style={{ fontSize: 10.5, color: C.amber, marginTop: 4, fontWeight: 700 }}>
+                      ⚠ Este papel no tiene renglones de {grosorFiltro}. Se están comparando todos los grosores — elige uno de arriba para comparar parejo.
+                    </div>
+                  )}
+                </div>
               )}
               {papelServicioId && opcionesPapel.length === 0 && (
                 <div style={{ fontSize: 11, color: C.coral, marginTop: 6 }}>
@@ -2786,8 +2889,13 @@ function Calculadora({ onCalcDone, cotizacion }) {
                   const tot = totalConMermaDe(neto, results.merma, results.mermaPliegosFijos);
                   if (tot == null) return null;
                   const mejor = mejorPrecioPliego(row.sheet.w, row.sheet.h, tot);
-                  return mejor ? { ...mejor, pliegosTotales: tot, costoPorPieza: mejor.costoTotal / results.qty } : { sinPrecio: true };
+                  const alternativas = preciosPorGrosor(row.sheet.w, row.sheet.h, tot);
+                  return mejor
+                    ? { ...mejor, pliegosTotales: tot, costoPorPieza: mejor.costoTotal / results.qty, alternativas }
+                    : { sinPrecio: true, alternativas };
                 })() : null}
+                grosorActivo={grosorFiltro}
+                onElegirGrosor={setGrosorFiltro}
                 esMasBarato={papelServicioId && row.sheet.label === labelMasBarato} />
             ))}
           </div>
