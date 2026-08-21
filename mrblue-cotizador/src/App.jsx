@@ -2189,6 +2189,12 @@ function AdminProveedores() {
           (d?.escalones || []).some(e => parseFloat(e.precio) > 0) &&
           CATS_SUSTRATO.includes(catalogoPorId[parseClaveEscalon(clave).servicioId]?.categoria)
         ).length;
+        // Papeles con precio — se cuentan procesos distintos, no renglones, para
+        // que un papel con 28 medidas cuente como uno.
+        const papelesCount = Object.entries(prov.precios || {}).filter(([clave, d]) =>
+          (d?.escalones || []).some(e => parseFloat(e.precio) > 0) &&
+          catalogoPorId[parseClaveEscalon(clave).servicioId]?.categoria === "papel"
+        ).length;
 
         return (
           <div key={prov.id} style={{ ...cardStyle, marginBottom: 12 }}>
@@ -2215,7 +2221,10 @@ function AdminProveedores() {
                 </div>
                 <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
                   {esPapelero
-                    ? (sustratosCount === 0 ? "Sin sustratos especiales" : `${sustratosCount} sustrato${sustratosCount > 1 ? "s" : ""} especial${sustratosCount > 1 ? "es" : ""}`)
+                    ? [
+                        papelesCount > 0 ? `${papelesCount} papel${papelesCount > 1 ? "es" : ""}` : "Sin papeles",
+                        sustratosCount > 0 ? `${sustratosCount} sustrato${sustratosCount > 1 ? "s" : ""} especial${sustratosCount > 1 ? "es" : ""}` : null,
+                      ].filter(Boolean).join(" · ")
                     : (maqCount === 0 ? "Sin máquinas" : `${maqCount} máquina${maqCount > 1 ? "s" : ""}`)}
                   {preciosConDatos > 0 && <span style={{ marginLeft: 8, color: C.green }}>· {preciosConDatos} proceso{preciosConDatos > 1 ? "s" : ""} con precio</span>}
                 </div>
@@ -2252,6 +2261,7 @@ function AdminProveedores() {
                     color: expanded[prov.id] === "precios" ? "#fff" : C.muted,
                     border: `1.5px solid ${expanded[prov.id] === "precios" ? C.cyan : C.border}` }}>
                   💰 {esPapelero ? "Precio papel" : "Precios"}
+                  {esPapelero && papelesCount > 0 && <span style={{ marginLeft: 3 }}>({papelesCount})</span>}
                 </button>
                 <button onClick={() => toggleSection(prov.id, "archivos")}
                   style={{ ...btn(expanded[prov.id] === "archivos" ? C.amber : C.bg),
