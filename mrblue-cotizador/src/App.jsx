@@ -432,6 +432,14 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
                 {papelInfo.caras ? ` · ${papelInfo.caras} cara${papelInfo.caras === "2" || papelInfo.caras === 2 ? "s" : ""}` : ""}
                 {papelInfo.acabado ? ` · ${papelInfo.acabado}` : ""}
               </div>
+              {papelInfo.recortado && (
+                <div style={{ gridColumn: "1 / -1", fontSize: 10.5, color: C.amber, fontWeight: 700 }}>
+                  ✂ Recortado de un pliego de {papelInfo.origen}
+                  {papelInfo.cortes > 1
+                    ? ` — salen ${papelInfo.cortes} por pliego, se compran ${papelInfo.pliegosACompar?.toLocaleString("es-MX")}`
+                    : " — se desperdicia el sobrante"}
+                </div>
+              )}
             </div>
           )}
           {(papelInfo.alternativas || []).length > 0 && (
@@ -445,11 +453,11 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
                   return (
                     <button key={a.grosor}
                       onClick={(ev) => { ev.stopPropagation(); onElegirGrosor && onElegirGrosor(activo ? "" : a.grosor); }}
-                      title={`${a.provNombre}${a.marca ? " · " + a.marca : ""} · $${a.unitario?.toFixed(2)} por pliego`}
+                      title={`${a.provNombre}${a.marca ? " · " + a.marca : ""}${a.recortado ? " · recortado de " + a.origen : ""} · $${a.unitario?.toFixed(2)} por pliego`}
                       style={{ background: activo ? C.cyan : C.card, color: activo ? "#fff" : C.text,
                         border: `1.5px solid ${activo ? C.cyan : C.border}`, borderRadius: 7,
                         padding: "3px 8px", fontSize: 10.5, cursor: onElegirGrosor ? "pointer" : "default", lineHeight: 1.3 }}>
-                      <b>{a.grosor}</b>{a.esPuntos ? " pts" : " g"}
+                      <b>{a.grosor}</b>{a.esPuntos ? " pts" : " g"}{a.recortado ? " ✂" : ""}
                       <span style={{ opacity: 0.75 }}> · ${a.costoTotal.toLocaleString("es-MX", { maximumFractionDigits: 0 })}</span>
                     </button>
                   );
@@ -693,6 +701,16 @@ const TABLA_MERMA_IMPRESION = [
 //  - pliegos fijos: sumas una cantidad exacta de pliegos (igual para toda medida)
 //  - porcentaje: se calcula proporcional a los netos (el de la tabla, o el que captures)
 // mermaPliegosFijos = null/undefined significa "usa el porcentaje".
+// Cuántos pliegos de w×h salen de uno de ow×oh al refilarlo. Prueba las dos
+// orientaciones y se queda con la que más rinda. 0 significa que no cabe.
+// Importa para no cotizar de más: de un 120×90 salen dos 60×90, no uno.
+function cortesDePliego(ow, oh, w, h) {
+  if (!(ow > 0 && oh > 0 && w > 0 && h > 0)) return 0;
+  const a = Math.floor(ow / w) * Math.floor(oh / h);
+  const b = Math.floor(ow / h) * Math.floor(oh / w);
+  return Math.max(a, b);
+}
+
 function totalConMermaDe(neto, mermaPct, mermaPliegosFijos) {
   if (neto == null) return null;
   const fijos = parseFloat(mermaPliegosFijos);
@@ -2500,20 +2518,43 @@ function Calculadora({ onCalcDone, cotizacion }) {
   }, [catalogoSustrato, todosProvs]);
 
   // Para una medida de pliego y una cantidad, la opción más barata disponible.
-  const mejorPrecioPliego = (w, h, pliegosTotales) => {
-    const candidatos = opcionesPapel.filter(o => o.w === w && o.h === h);
-    if (!candidatos.length) return null;
-    const conCosto = candidatos.map(o => {
+  // Considera la medida exacta y también pliegos más grandes que se refilan.
+  // Un 61×90 sirve para un 60×90 desperdiciando una tira; y de uno muy grande
+  // pueden salir varios, así que el costo se reparte entre los cortes.
+  const candidatosPara = (w, h, pliegosTotales) => {
+    const out = [];
+    opcionesPapel.forEach(o => {
+      const exacto = o.w === w && o.h === h;
+      const cortes = exacto ? 1 : cortesDePliego(o.w, o.h, w, h);
+      if (cortes < 1) return;
+      const pliegosACompar = Math.ceil(pliegosTotales / cortes);
       const min = o.tiraje_min === "" || o.tiraje_min == null ? 0 : parseFloat(o.tiraje_min);
       const max = o.tiraje_max === "" || o.tiraje_max == null ? Infinity : parseFloat(o.tiraje_max);
-      const aplica = pliegosTotales >= min && pliegosTotales <= max;
-      const costo = costoServicioPorCantidad(servicioPapel?.unidad_precio, o.precio, pliegosTotales);
-      return { ...o, aplica, costoTotal: costo, unitario: costo != null && pliegosTotales > 0 ? costo / pliegosTotales : null };
-    }).filter(o => o.costoTotal != null);
+      const costo = costoServicioPorCantidad(servicioPapel?.unidad_precio, o.precio, pliegosACompar);
+      if (costo == null) return;
+      out.push({
+        ...o,
+        aplica: pliegosACompar >= min && pliegosACompar <= max,
+        costoTotal: costo,
+        unitario: pliegosTotales > 0 ? costo / pliegosTotales : null,
+        recortado: !exacto,
+        cortes,
+        pliegosACompar,
+        origen: `${o.w}×${o.h}`,
+      });
+    });
+    return out;
+  };
+
+  const mejorPrecioPliego = (w, h, pliegosTotales) => {
+    const conCosto = candidatosPara(w, h, pliegosTotales);
     if (!conCosto.length) return null;
     const enRango = conCosto.filter(o => o.aplica);
     const pool = enRango.length ? enRango : conCosto;
-    return pool.sort((a, b) => a.costoTotal - b.costoTotal)[0];
+    // A igualdad de costo gana la medida exacta: menos refilado, menos riesgo.
+    return pool.sort((a, b) =>
+      a.costoTotal - b.costoTotal || (a.recortado === b.recortado ? 0 : a.recortado ? 1 : -1)
+    )[0];
   };
 
   const servicioSustrato = catalogoSustrato.find(s => s.id === sustratoServicioId);
@@ -2551,17 +2592,15 @@ function Calculadora({ onCalcDone, cotizacion }) {
   // ver dentro de cada tarjeta qué gramajes hay y a cómo sale cada uno.
   const preciosPorGrosor = (w, h, pliegosTotales) => {
     const porGrosor = new Map();
-    opcionesPapelTodas.filter(o => o.w === w && o.h === h).forEach(o => {
+    candidatosPara(w, h, pliegosTotales).forEach(o => {
       const g = parseFloat(o.gramaje) || parseFloat(o.puntos);
       if (!Number.isFinite(g) || g <= 0) return;
-      const costo = costoServicioPorCantidad(servicioPapel?.unidad_precio, o.precio, pliegosTotales);
-      if (costo == null) return;
       const clave = String(g);
       const previo = porGrosor.get(clave);
-      if (!previo || costo < previo.costoTotal) {
+      if (!previo || o.costoTotal < previo.costoTotal) {
         porGrosor.set(clave, {
-          grosor: clave, costoTotal: costo, provNombre: o.provNombre, marca: o.marca,
-          unitario: pliegosTotales > 0 ? costo / pliegosTotales : null,
+          grosor: clave, costoTotal: o.costoTotal, provNombre: o.provNombre, marca: o.marca,
+          unitario: o.unitario, recortado: o.recortado, origen: o.origen,
           esPuntos: !(parseFloat(o.gramaje) > 0),
         });
       }
