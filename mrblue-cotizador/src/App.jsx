@@ -3284,7 +3284,12 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const costoFijosSeleccionados = Object.entries(costosFijosSel).reduce((sum, [sid, pid]) => sum + (costoDe(pid, sid, 0) || 0), 0);
   const subtotalAntesDeUrgencia = costoPapel + costoSustrato + costoImp + costoColorExtra + costoBarniz + costoAcabados + costoFijosSeleccionados + costoFlete + costoExtras;
   const costoUrgencia = subtotalAntesDeUrgencia * ((parseFloat(cargoUrgenciaPct) || 0) / 100);
-  const costoTotal = subtotalAntesDeUrgencia + costoUrgencia;
+  const costoDirecto = subtotalAntesDeUrgencia + costoUrgencia;
+  // Gasto indirecto: prorrateo de operación fija (renta, contabilidad, software, etc.),
+  // configurable en ⚙ Ajustes → 💰 Costos. Se aplica sobre el costo directo, antes del margen.
+  const tasaIndirectoPct = parseFloat(localStorage.getItem("mrblue_tasa_indirecto")) || 5;
+  const gastoIndirecto = costoDirecto * (tasaIndirectoPct / 100);
+  const costoTotal = costoDirecto + gastoIndirecto;
 
   const desgloseArr = [
     papelServicioId && { label: "Papel · " + nombreServicio(papelServicioId), prov: nombreProv(papelProvId), v: costoPapel },
@@ -3874,10 +3879,15 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           <div>
             <label style={labelStyle}>Margen (%)</label>
             <input type="number" value={margen} onChange={e => setMargen(e.target.value)} placeholder="35" style={inputStyle} />
+            {m > 0 && m < 1 && (
+              <div style={{ fontSize: 10.5, color: C.muted, marginTop: 3 }}>
+                ≈ {(m / (1 - m) * 100).toFixed(1)}% sobre el costo total
+              </div>
+            )}
           </div>
         </div>
         <div style={{ marginTop: 6, fontSize: 11, color: C.muted }}>
-          El margen se aplica sobre el precio de venta: precio = costo ÷ (1 − margen). El cargo por urgencia se aplica sobre el subtotal antes del margen.
+          El margen se aplica sobre el costo total (directo + indirecto): precio = costo total ÷ (1 − margen). El cargo por urgencia se aplica sobre el subtotal antes del indirecto y el margen.
         </div>
       </div>
 
@@ -3893,6 +3903,12 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           </div>
         ))}
 
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#D7E7F2", padding: "5px 0", borderTop: "1px solid rgba(255,255,255,0.25)", marginTop: 4 }}>
+          <span>Subtotal (costo directo)</span><span style={{ fontWeight: 600 }}>{money(costoDirecto)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#8BBDD6", padding: "2px 0" }}>
+          <span>Gasto indirecto ({tasaIndirectoPct}%)</span><span>{money(gastoIndirecto)}</span>
+        </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, color: "#fff", fontWeight: 700, padding: "10px 0 4px" }}>
           <span>COSTO TOTAL</span><span>{money(costoTotal)}</span>
         </div>
@@ -5088,8 +5104,11 @@ function Ajustes() {
   const [resendKey, setResendKey] = useState(() => localStorage.getItem("mrblue_resend_key") || "");
   const [fromEmail, setFromEmail] = useState(() => localStorage.getItem("mrblue_from_email") || "");
 
+  const [tasaIndirecto, setTasaIndirecto] = useState(() => localStorage.getItem("mrblue_tasa_indirecto") || "5");
+
   const secciones = [
     { key: "general",     label: "⚙ General"      },
+    { key: "costos",      label: "💰 Costos"       },
     { key: "proveedores", label: "🏭 Proveedores"  },
     { key: "templates",   label: "📝 Templates"    },
   ];
@@ -5142,6 +5161,31 @@ function Ajustes() {
 
           <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
             Esto se guarda en este navegador (localStorage) — si abres el Cotizador desde otra computadora o navegador, vas a tener que capturarlo de nuevo ahí.
+          </div>
+        </>
+      )}
+
+      {seccion === "costos" && (
+        <>
+          <div style={cardStyle}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 12 }}>
+              💰 Gasto indirecto (prorrateo de operación fija)
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ maxWidth: 220 }}>
+                <label style={labelStyle}>Tasa de gasto indirecto (%)</label>
+                <input value={tasaIndirecto} onChange={e => { setTasaIndirecto(e.target.value); localStorage.setItem("mrblue_tasa_indirecto", e.target.value); }}
+                  type="number" step="0.01" placeholder="5.00" style={inputStyle} />
+              </div>
+              <div style={{ fontSize: 11, color: C.muted }}>
+                Se aplica automático sobre el costo directo de cada cotización en 💵 Cotizar, antes del margen — cubre
+                renta, contabilidad, software, transporte y demás operación fija del estudio. Calibrado con datos
+                reales Ene–Jul 2026: ~$50,602/mes de indirecto contra ~$1,012,144/mes de costo directo promedio.
+              </div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
+            Esto se guarda en este navegador (localStorage) — si abres el Cotizador desde otra computadora, captúralo de nuevo ahí.
           </div>
         </>
       )}
