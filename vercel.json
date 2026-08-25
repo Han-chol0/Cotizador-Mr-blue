@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/generar-costeo.js": {
+      "includeFiles": "node_modules/pdfkit/js/**"
+    }
+  }
+}

@@ -2,6 +2,13 @@
 // la tarea de ClickUp. El token de ClickUp vive en variables de entorno de
 // Vercel (CLICKUP_API_TOKEN) — nunca toca el navegador.
 import PDFDocument from "pdfkit";
+// pdfkit carga las fuentes estándar con un require dinámico, así que el
+// empaquetador de Vercel no las detecta y en producción truena con
+// "Cannot find module .../standard-fonts/Helvetica.cjs". Importarlas aquí las
+// mete al grafo de módulos y quedan incluidas en el deploy.
+import "pdfkit/standard-fonts/Helvetica";
+import "pdfkit/standard-fonts/HelveticaBold";
+import "pdfkit/standard-fonts/HelveticaOblique";
 
 const NAVY = "#1E3A5F";
 const CYAN = "#0095D4";
