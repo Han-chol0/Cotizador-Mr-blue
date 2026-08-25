@@ -511,8 +511,25 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
 // para seguir funcionando si Supabase no contesta.
 // OJO: aquí NO van secretos (API keys) — cualquiera con la llave pública podría
 // leerlos. Esos se quedan en localStorage de cada quien.
-const CONFIG_DEFAULTS = { tasa_indirecto: "5" };
+const CONFIG_DEFAULTS = { tasa_indirecto: "15.88", isr_pct: "33", margen_neto_pct: "20" };
 const cfgKeyLocal = (clave) => "mrblue_cfg_" + clave;
+
+// El piso de margen no se guarda: se calcula, para que al actualizar el ISR
+// después de la declaración anual se recorra solo en toda la app.
+//
+// Todo está expresado como MARGEN SOBRE VENTA (precio = costo / (1 - m)),
+// misma convención que el Cotizador y el Formato de Costeo:
+//   utilidad bruta sobre venta = m
+//   lo que queda tras ISR        = m × (1 - ISR)
+//   para que quede `neto`:         m = neto / (1 - ISR)
+// Ej: para netear 20% con ISR 33% hay que cotizar al 29.85%.
+function calcularPisoMargen(isrPct, netoPct) {
+  const isr = (parseFloat(isrPct) || 0) / 100;
+  const neto = (parseFloat(netoPct) || 0) / 100;
+  if (isr >= 1 || neto <= 0) return null;
+  const piso = (neto / (1 - isr)) * 100;
+  return piso >= 100 ? null : piso;
+}
 
 function getConfigLocal(clave) {
   const v = localStorage.getItem(cfgKeyLocal(clave));
@@ -540,20 +557,40 @@ async function saveConfigDB(clave, valor) {
   return null;
 }
 
-// Lee una configuración: arranca con el caché local y se actualiza cuando
-// responde Supabase. Devuelve [valor, cargando].
-function useConfig(clave) {
-  const [valor, setValor] = useState(() => getConfigLocal(clave));
+// Una sola petición compartida: si tres componentes piden configuración a la
+// vez, no se disparan tres consultas.
+let _cfgPromesa = null;
+function cargarConfigUnaVez(forzar = false) {
+  if (forzar || !_cfgPromesa) _cfgPromesa = loadConfigDB();
+  return _cfgPromesa;
+}
+
+// Lee una o varias configuraciones: arranca con el caché local y se actualiza
+// cuando responde Supabase. Con string devuelve el valor; con arreglo, un objeto.
+function useConfig(claves) {
+  const esLista = Array.isArray(claves);
+  const lista = esLista ? claves : [claves];
+  const llave = lista.join(",");
+  const [valores, setValores] = useState(() => {
+    const o = {};
+    lista.forEach(k => { o[k] = getConfigLocal(k); });
+    return o;
+  });
   useEffect(() => {
     let vivo = true;
-    loadConfigDB().then(cfg => {
-      if (!vivo || !cfg || cfg[clave] == null) return;
-      localStorage.setItem(cfgKeyLocal(clave), cfg[clave]);
-      setValor(cfg[clave]);
+    cargarConfigUnaVez().then(cfg => {
+      if (!vivo || !cfg) return;
+      const o = {};
+      lista.forEach(k => {
+        if (cfg[k] != null) { localStorage.setItem(cfgKeyLocal(k), cfg[k]); o[k] = cfg[k]; }
+        else o[k] = getConfigLocal(k);
+      });
+      setValores(o);
     });
     return () => { vivo = false; };
-  }, [clave]);
-  return valor;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [llave]);
+  return esLista ? valores : valores[claves];
 }
 
 async function loadServiciosCatalogo() {
@@ -3221,6 +3258,17 @@ function Calculadora({ onCalcDone, cotizacion }) {
 // proveedor (Supabase) para armar el costo y el precio de venta. El margen se
 // aplica sobre venta (precio = costo / (1 - margen)), igual que la base de Excel.
 
+// Escalones de margen que se le ofrecen al vendedor en el formato de costeo.
+// El primero es el piso (calculado), y de ahí para arriba en tramos de 5.
+// No hay escalones por debajo del piso: antes existían (15%, 20%, 25%) y eran
+// una trampa — el vendedor creía estar ganando y el trabajo dejaba casi cero.
+const ESCALONES_FIJOS = [35, 40, 45, 50, 55, 60];
+function escalonesConPiso(piso) {
+  if (piso == null) return ESCALONES_FIJOS;
+  const arriba = ESCALONES_FIJOS.filter(m => m > piso + 0.5);
+  return [Math.round(piso * 100) / 100, ...arriba];
+}
+
 function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados, onVerHistorial }) {
   const [proveedores, setProveedores] = useState([]);
   const [catalogo, setCatalogo] = useState([]);
@@ -3281,7 +3329,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const [realesPorLinea, setRealesPorLinea] = useState({});
   const [extras, setExtras] = useState("");
   const [margen, setMargen] = useState("35");
-  const tasaIndirectoCfg = useConfig("tasa_indirecto");
+  const cfg = useConfig(["tasa_indirecto", "isr_pct", "margen_neto_pct"]);
+  const tasaIndirectoCfg = cfg.tasa_indirecto;
+  const pisoMargen = calcularPisoMargen(cfg.isr_pct, cfg.margen_neto_pct);
   // Trabajos ya agendados, para avisar si un proveedor se traslapa. Se cargan
   // una vez porque se consultan durante el render.
   const [cronogramaTrabajos, setCronogramaTrabajos] = useState([]);
@@ -3289,6 +3339,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   // Historial de precios de este folio, para la tarjeta de abajo.
   const [historialFolio, setHistorialFolio] = useState([]);
   const [errorGuardadoCot, setErrorGuardadoCot] = useState("");
+  const [generandoCosteo, setGenerandoCosteo] = useState(false);
+  const [costeoListo, setCosteoListo] = useState(false);
+  const [resultadoCosteo, setResultadoCosteo] = useState(null);
   useEffect(() => {
     const cotId = cotizacion?.cot_id || trabajoIdRef.current;
     historialPreciosDe(cotId).then(setHistorialFolio);
@@ -3507,11 +3560,94 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const horasEstimadas = maquinaImp && pliegos && parseFloat(maquinaImp.velocidadHora) > 0
     ? pliegos / parseFloat(maquinaImp.velocidadHora) : null;
   const m = Math.min(Math.max(parseFloat(margen) || 0, 0), 90) / 100;
+  const bajoPiso = pisoMargen != null && m > 0 && m * 100 < pisoMargen;
   const precioVenta = costoTotal > 0 ? costoTotal / (1 - m) : 0;
   const utilidad = precioVenta - costoTotal;
 
   const precioUnitario = qty > 0 ? precioVenta / qty : 0;
   const precioMillar = precioUnitario * 1000;
+
+  // Arma el FORMATO DE COSTEO y lo manda a la función serverless, que genera el
+  // PDF y lo adjunta a la tarea de ClickUp. El PDF regresa también en base64
+  // para descargarlo, por si la cotización todavía no tiene tarea.
+  const generarCosteo = async () => {
+    setGenerandoCosteo(true);
+    setResultadoCosteo(null);
+    setCosteoListo(false);
+    try {
+      const costoUnitario = qty > 0 ? costoTotal / qty : 0;
+      const isr = (parseFloat(cfg.isr_pct) || 0) / 100;
+      const escalera = escalonesConPiso(pisoMargen).map(mg => {
+        const mm = mg / 100;
+        const ventaTotal = costoTotal / (1 - mm);
+        const precioUnit = qty > 0 ? ventaTotal / qty : 0;
+        return {
+          margen: mg, precioUnit, utilidadUnit: precioUnit - costoUnitario,
+          ventaTotal, utilidadTotal: ventaTotal - costoTotal,
+          netoTrasIsr: mg * (1 - isr),
+          esPiso: pisoMargen != null && Math.abs(mg - pisoMargen) < 0.51,
+          bajoPiso: pisoMargen != null && mg < pisoMargen - 0.51,
+        };
+      });
+
+      const payload = {
+        task_id: cotizacion?.task_id || null,
+        agente: cotizacion?.agente || "",
+        cliente: cotizacion?.cliente || "",
+        proyecto: cotizacion?.nombre_proyecto || "",
+        elaborado: getUsuario() || "",
+        fecha: new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "2-digit" }),
+        cantidad: qty ? qty.toLocaleString("es-MX") + " PIEZAS" : "",
+        material: calcData?.papelNombre || cotizacion?.papel_acabado_gramaje || "",
+        acabado: (acabados || []).map(a => a.nombre).join(", ") || cotizacion?.detalles || "",
+        medida: calcData ? `${calcData.pw}x${calcData.ph}` : (cotizacion?.tamano_final || ""),
+        lineas: desgloseArr.map(r => ({ label: r.label, monto: r.v })),
+        costoTotal, costoUnitario, qty,
+        pisoMargen: pisoMargen ?? null,
+        isrPct: parseFloat(cfg.isr_pct) || 0,
+        notaIndirecto: tasaIndirectoPct > 0
+          ? `El costo total incluye ${tasaIndirectoPct}% de gasto indirecto (operación fija prorrateada).`
+          : null,
+        escalera,
+      };
+
+      const r = await fetch("/api/generar-costeo", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data.error) throw new Error(data.error || `El servidor respondió ${r.status}`);
+
+      // Descarga local del PDF
+      if (data.pdfBase64) {
+        const bin = atob(data.pdfBase64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = data.nombreArchivo || "costeo.pdf";
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      }
+
+      const cu = data.clickup || {};
+      setResultadoCosteo({
+        mensaje: cu.ok
+          ? "✓ PDF descargado y adjuntado a la tarea de ClickUp."
+          : cu.intentado
+            ? `✓ PDF descargado, pero no se pudo adjuntar a ClickUp: ${cu.error}`
+            : "✓ PDF descargado. Esta cotización no tiene tarea de ClickUp ligada.",
+        error: cu.intentado && !cu.ok ? null : null,
+      });
+      setCosteoListo(true);
+      setTimeout(() => setCosteoListo(false), 4000);
+    } catch (e) {
+      setResultadoCosteo({ error: e.message });
+    } finally {
+      setGenerandoCosteo(false);
+    }
+  };
+
 
   const money = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -4063,14 +4199,28 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           </div>
           <div>
             <label style={labelStyle}>Margen (%)</label>
-            <input type="number" value={margen} onChange={e => setMargen(e.target.value)} placeholder="35" style={inputStyle} />
+            <input type="number" value={margen} onChange={e => setMargen(e.target.value)} placeholder="35"
+              style={{ ...inputStyle, borderColor: bajoPiso ? C.red : inputStyle.border?.split(" ")[2] || undefined,
+                border: bajoPiso ? `1.5px solid ${C.red}` : inputStyle.border }} />
             {m > 0 && m < 1 && (
               <div style={{ fontSize: 10.5, color: C.muted, marginTop: 3 }}>
                 ≈ {(m / (1 - m) * 100).toFixed(1)}% sobre el costo total
               </div>
             )}
+            {pisoMargen != null && !bajoPiso && m > 0 && (
+              <div style={{ fontSize: 10.5, color: C.green, marginTop: 2, fontWeight: 700 }}>
+                ✓ Arriba del piso ({pisoMargen.toFixed(1)}%)
+              </div>
+            )}
           </div>
         </div>
+        {bajoPiso && (
+          <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 12px",
+            fontSize: 11.5, color: C.red, marginTop: 8 }}>
+            ⚠ <b>Margen bajo el punto de equilibrio.</b> Tu piso es <b>{pisoMargen.toFixed(2)}%</b> — con {(m * 100).toFixed(1)}%
+            este trabajo no alcanza a cubrir operación e ISR. Ajústalo en ⚙ Ajustes → 💰 Costos si tu situación fiscal cambió.
+          </div>
+        )}
         <div style={{ marginTop: 6, fontSize: 11, color: C.muted }}>
           El margen se aplica sobre el costo total (directo + indirecto): precio = costo total ÷ (1 − margen). El cargo por urgencia se aplica sobre el subtotal antes del indirecto y el margen.
         </div>
@@ -4230,6 +4380,23 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           {guardadoPrecio ? "✓ Guardado" : "💾 Guardar cotización"}
         </button>
       </div>
+
+      <button onClick={generarCosteo} disabled={costoTotal <= 0 || generandoCosteo}
+        style={{ ...btn(costeoListo ? C.green : C.cyan, true), marginTop: 8, width: "100%",
+          opacity: costoTotal <= 0 || generandoCosteo ? 0.6 : 1 }}>
+        {generandoCosteo ? "Generando…" : costeoListo ? "✓ Formato generado" : "📄 Generar formato de costeo"}
+      </button>
+      <div style={{ fontSize: 10.5, color: C.muted, marginTop: 4 }}>
+        Arma el PDF con la escalera desde el piso ({pisoMargen != null ? pisoMargen.toFixed(2) + "%" : "—"}) hasta 60% para el vendedor
+        {cotizacion?.task_id ? " y lo adjunta solo a la tarea de ClickUp." : ". Esta cotización no tiene tarea de ClickUp, así que solo se descarga."}
+      </div>
+      {resultadoCosteo && (
+        <div style={{ background: resultadoCosteo.error ? "#FEF2F2" : "#EAF7EE",
+          border: `1.5px solid ${resultadoCosteo.error ? C.red : C.green}`, borderRadius: 8,
+          padding: "9px 12px", fontSize: 11.5, color: resultadoCosteo.error ? C.red : C.navy, marginTop: 8 }}>
+          {resultadoCosteo.error ? "⚠ " + resultadoCosteo.error : resultadoCosteo.mensaje}
+        </div>
+      )}
 
       {errorGuardadoCot && (
         <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 12px", fontSize: 12, color: C.red, marginTop: 8 }}>
@@ -5349,35 +5516,52 @@ function Ajustes() {
   const [fromEmail, setFromEmail] = useState(() => localStorage.getItem("mrblue_from_email") || "");
 
   const [tasaIndirecto, setTasaIndirecto] = useState(() => getConfigLocal("tasa_indirecto"));
+  const [isrPct, setIsrPct] = useState(() => getConfigLocal("isr_pct"));
+  const [margenNetoPct, setMargenNetoPct] = useState(() => getConfigLocal("margen_neto_pct"));
   const [guardandoTasa, setGuardandoTasa] = useState(false);
   const [tasaGuardada, setTasaGuardada] = useState(false);
   const [errorTasa, setErrorTasa] = useState("");
+  const pisoCalculado = calcularPisoMargen(isrPct, margenNetoPct);
 
   // Al abrir Ajustes se trae el valor real del equipo, por si otro lo cambió.
   useEffect(() => {
-    loadConfigDB().then(cfg => {
-      if (cfg && cfg.tasa_indirecto != null) setTasaIndirecto(cfg.tasa_indirecto);
+    cargarConfigUnaVez(true).then(cfg => {
+      if (!cfg) return;
+      if (cfg.tasa_indirecto != null) setTasaIndirecto(cfg.tasa_indirecto);
+      if (cfg.isr_pct != null) setIsrPct(cfg.isr_pct);
+      if (cfg.margen_neto_pct != null) setMargenNetoPct(cfg.margen_neto_pct);
     });
   }, []);
 
   const guardarTasa = async () => {
-    const n = parseFloat(tasaIndirecto);
-    if (!Number.isFinite(n) || n < 0 || n > 100) {
-      setErrorTasa("La tasa debe ser un número entre 0 y 100.");
-      return;
+    const campos = [
+      ["tasa_indirecto", tasaIndirecto, "La tasa de gasto indirecto"],
+      ["isr_pct", isrPct, "El coeficiente de ISR"],
+      ["margen_neto_pct", margenNetoPct, "La utilidad neta deseada"],
+    ];
+    for (const [, val, etiqueta] of campos) {
+      const n = parseFloat(val);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        setErrorTasa(`${etiqueta} debe ser un número entre 0 y 100.`);
+        return;
+      }
     }
     setGuardandoTasa(true);
     setErrorTasa("");
-    const err = await saveConfigDB("tasa_indirecto", n);
-    setGuardandoTasa(false);
-    if (err) {
-      setErrorTasa(
-        /relation|does not exist/i.test(err)
-          ? 'Falta la tabla "configuracion" en Supabase — corre el SQL que viene en las notas del cambio.'
-          : "No se pudo guardar: " + err
-      );
-      return;
+    for (const [clave, val] of campos) {
+      const err = await saveConfigDB(clave, parseFloat(val));
+      if (err) {
+        setGuardandoTasa(false);
+        setErrorTasa(
+          /relation|does not exist/i.test(err)
+            ? 'Falta la tabla "configuracion" en Supabase — corre el SQL de la migración.'
+            : "No se pudo guardar: " + err
+        );
+        return;
+      }
     }
+    cargarConfigUnaVez(true); // refresca el caché compartido
+    setGuardandoTasa(false);
     setTasaGuardada(true);
     setTimeout(() => setTasaGuardada(false), 3000);
   };
@@ -5455,16 +5639,7 @@ function Ajustes() {
                     onChange={e => { setTasaIndirecto(e.target.value); setTasaGuardada(false); setErrorTasa(""); }}
                     type="number" step="0.01" placeholder="5.00" style={inputStyle} />
                 </div>
-                <button onClick={guardarTasa} disabled={guardandoTasa}
-                  style={{ ...btn(tasaGuardada ? C.green : C.cyan), opacity: guardandoTasa ? 0.6 : 1, marginBottom: 0 }}>
-                  {guardandoTasa ? "Guardando…" : tasaGuardada ? "✓ Guardada para el equipo" : "Guardar"}
-                </button>
               </div>
-              {errorTasa && (
-                <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "8px 12px", fontSize: 11.5, color: C.red }}>
-                  ⚠ {errorTasa}
-                </div>
-              )}
               <div style={{ fontSize: 11, color: C.muted }}>
                 Se aplica automático sobre el costo directo de cada cotización en 💵 Cotizar, antes del margen — cubre
                 renta, contabilidad, software, transporte y demás operación fija del estudio. Calibrado con datos
@@ -5472,6 +5647,53 @@ function Ajustes() {
               </div>
             </div>
           </div>
+
+          <div style={{ ...cardStyle, marginTop: 12 }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 4 }}>
+              📉 Piso de margen (punto de equilibrio)
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
+              El piso no se captura: se calcula con estos dos datos. El coeficiente de ISR cambia cada año con la
+              declaración anual — actualízalo aquí y el piso se recorre solo en todo el Cotizador.
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+              <div style={{ flex: "0 0 150px" }}>
+                <label style={labelStyle}>Coeficiente ISR (%)</label>
+                <input value={isrPct} onChange={e => { setIsrPct(e.target.value); setTasaGuardada(false); setErrorTasa(""); }}
+                  type="number" step="0.01" placeholder="33" style={inputStyle} />
+              </div>
+              <div style={{ flex: "0 0 190px" }}>
+                <label style={labelStyle}>Utilidad neta deseada (%)</label>
+                <input value={margenNetoPct} onChange={e => { setMargenNetoPct(e.target.value); setTasaGuardada(false); setErrorTasa(""); }}
+                  type="number" step="0.01" placeholder="30" style={inputStyle} />
+                <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>Sobre la venta, ya libre de ISR</div>
+              </div>
+            </div>
+            {pisoCalculado != null && (
+              <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "10px 14px" }}>
+                <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 700 }}>
+                  Piso de margen sobre venta
+                </div>
+                <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 26, color: C.navy, lineHeight: 1.2 }}>
+                  {pisoCalculado.toFixed(2)}%
+                </div>
+                <div style={{ fontSize: 10.5, color: C.muted, marginTop: 3 }}>
+                  Cotizando a {pisoCalculado.toFixed(2)}%, después del ISR te quedan {margenNetoPct}% netos sobre la venta.
+                  Equivale a {(pisoCalculado / (100 - pisoCalculado) * 100).toFixed(2)}% de markup sobre el costo.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {errorTasa && (
+            <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 12px", fontSize: 11.5, color: C.red, marginTop: 12 }}>
+              ⚠ {errorTasa}
+            </div>
+          )}
+          <button onClick={guardarTasa} disabled={guardandoTasa}
+            style={{ ...btn(tasaGuardada ? C.green : C.cyan), marginTop: 12, opacity: guardandoTasa ? 0.6 : 1 }}>
+            {guardandoTasa ? "Guardando…" : tasaGuardada ? "✓ Guardado para el equipo" : "Guardar configuración de costos"}
+          </button>
           <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
             Esta tasa se guarda en Supabase, así que aplica para todo el equipo — si Remedios abre el Cotizador desde
             su computadora, va a usar la misma. Los cambios se reflejan al recargar.
@@ -6111,16 +6333,6 @@ function SolicitudCotizacion({ onGuardar }) {
   const [cargandoDeSupabase, setCargandoDeSupabase] = useState(false);
   const [sincronizando, setSincronizando] = useState(false);
   const [syncError, setSyncError] = useState(null);
-  // Sube a Supabase el cronograma y el historial que hayan quedado en este
-  // navegador. Corre una sola vez por navegador y no borra nada local.
-  const [avisoMigracion, setAvisoMigracion] = useState(null);
-  // Folio al que se filtra el historial cuando se llega desde 💵 Cotizar.
-  const [historialFiltro, setHistorialFiltro] = useState(null);
-  useEffect(() => {
-    migrarLocalStorageASupabase().then(r => {
-      if (r && (r.cronoSubidos || r.historialSubidos || r.error)) setAvisoMigracion(r);
-    });
-  }, []);
 
   // ── Prioridad más alta: ?cot_id=UUID en la URL (llega vía Make → Supabase) ──
   // Se resuelve async, así que corre en un efecto y sobreescribe lo que sea
@@ -6223,20 +6435,6 @@ function SolicitudCotizacion({ onGuardar }) {
 
   return (
     <div>
-      {avisoMigracion && (
-        <div style={{ background: avisoMigracion.error ? "#FEF2F2" : "#EAF7EE",
-          border: `1.5px solid ${avisoMigracion.error ? C.red : C.green}`, borderRadius: 8,
-          padding: "9px 14px", marginBottom: 12, fontSize: 12, color: avisoMigracion.error ? C.red : C.navy,
-          display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ flex: 1 }}>
-            {avisoMigracion.error
-              ? `⚠ No se pudo subir todo lo que tenías guardado en este navegador (${avisoMigracion.error}). Tus datos locales siguen intactos — se reintentará al recargar.`
-              : `✓ Se subieron a la nube ${avisoMigracion.cronoSubidos} trabajo${avisoMigracion.cronoSubidos === 1 ? "" : "s"} del cronograma y ${avisoMigracion.historialSubidos} registro${avisoMigracion.historialSubidos === 1 ? "" : "s"} de precios que estaban solo en este navegador. Ahora los ve todo el equipo.`}
-          </span>
-          <button onClick={() => setAvisoMigracion(null)}
-            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "inherit", opacity: 0.6 }}>×</button>
-        </div>
-      )}
       {cargandoDeSupabase && (
         <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: C.navy }}>
           ⏳ Cargando datos de la solicitud desde ClickUp…
@@ -7012,6 +7210,16 @@ function SelectorUsuario({ onElegir }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [tab, setTab] = useState("inbox");
+  // Folio al que se filtra el historial cuando se llega desde 💵 Cotizar.
+  const [historialFiltro, setHistorialFiltro] = useState(null);
+  // Sube a Supabase el cronograma y el historial que hayan quedado en este
+  // navegador. Corre una sola vez por navegador y no borra nada local.
+  const [avisoMigracion, setAvisoMigracion] = useState(null);
+  useEffect(() => {
+    migrarLocalStorageASupabase().then(r => {
+      if (r && (r.cronoSubidos || r.historialSubidos || r.error)) setAvisoMigracion(r);
+    });
+  }, []);
   const [usuario, setUsuario] = useState(() => getUsuario());
   const [calcData, setCalcData]     = useState(null);
   const [tiempoEstimado, setTiempoEstimado] = useState(null); // {horas, maquinaNombre} o null
@@ -7111,6 +7319,20 @@ export default function App() {
       </div>
 
       <div style={{ maxWidth: 740, margin: "0 auto", padding: "20px 14px" }}>
+        {avisoMigracion && (
+          <div style={{ background: avisoMigracion.error ? "#FEF2F2" : "#EAF7EE",
+            border: `1.5px solid ${avisoMigracion.error ? C.red : C.green}`, borderRadius: 8,
+            padding: "9px 14px", marginBottom: 12, fontSize: 12, color: avisoMigracion.error ? C.red : C.navy,
+            display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ flex: 1 }}>
+              {avisoMigracion.error
+                ? `⚠ No se pudo subir lo que tenías guardado en este navegador (${avisoMigracion.error}). Tus datos locales siguen intactos — se reintentará al recargar.`
+                : `✓ Se subieron a la nube ${avisoMigracion.cronoSubidos} trabajo${avisoMigracion.cronoSubidos === 1 ? "" : "s"} del cronograma y ${avisoMigracion.historialSubidos} registro${avisoMigracion.historialSubidos === 1 ? "" : "s"} de precios que estaban solo en este navegador. Ahora los ve todo el equipo.`}
+            </span>
+            <button onClick={() => setAvisoMigracion(null)}
+              style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "inherit", opacity: 0.6 }}>×</button>
+          </div>
+        )}
         {tab === "inbox" && (
           <InboxCotizaciones
             onAbrir={handleAbrirDelInbox}
