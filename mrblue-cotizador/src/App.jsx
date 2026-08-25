@@ -3221,7 +3221,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
 // proveedor (Supabase) para armar el costo y el precio de venta. El margen se
 // aplica sobre venta (precio = costo / (1 - margen)), igual que la base de Excel.
 
-function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados }) {
+function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados, onVerHistorial }) {
   const [proveedores, setProveedores] = useState([]);
   const [catalogo, setCatalogo] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4240,20 +4240,21 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
       {(() => {
         const hist = historialFolio;
         if (hist.length === 0) return null;
+        const previa = hist.find(h => h.id !== undefined);
         return (
-          <div style={{ ...cardStyle, marginTop: 12 }}>
-            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: C.navy, marginBottom: 8 }}>
-              📈 Historial de precios de este folio {hist[0].folio ? "(" + hist[0].folio + ")" : ""}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {hist.map(h => (
-                <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                  background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "7px 12px", fontSize: 12.5 }}>
-                  <span style={{ color: C.muted }}>{new Date(h.fecha).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric" })} · {h.qty?.toLocaleString("es-MX")} pzas</span>
-                  <span><b style={{ color: C.navy }}>{money(h.costoTotal)}</b> costo · <b style={{ color: C.coral }}>{money(h.precioVenta)}</b> venta</span>
-                </div>
-              ))}
-            </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap",
+            background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", marginTop: 12, fontSize: 12 }}>
+            <span style={{ color: C.muted }}>
+              📈 Este folio ya tiene <b style={{ color: C.text }}>{hist.length}</b> {hist.length === 1 ? "versión guardada" : "versiones guardadas"}
+              {previa ? <> · la última en <b style={{ color: C.navy }}>{money(previa.precioVenta)}</b> de venta</> : null}
+            </span>
+            {onVerHistorial && (
+              <button onClick={() => onVerHistorial()}
+                style={{ background: "none", border: `1.5px solid ${C.cyan}`, color: C.cyan, borderRadius: 7,
+                  padding: "3px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                Ver historial →
+              </button>
+            )}
           </div>
         );
       })()}
@@ -4498,7 +4499,7 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Muestra el historial de precios. Sin props lista todas las cotizaciones;
 // con cotIdFiltro muestra sólo la de esa cotización (para verlo desde adentro).
-function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
+function HistorialPreciosCotizaciones({ cotIdFiltro = null, onLimpiarFiltro = null }) {
   const money = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const [busqueda, setBusqueda] = useState("");
   const [abierto, setAbierto] = useState(cotIdFiltro || null); // cot_id expandido
@@ -4539,6 +4540,13 @@ function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
             : "Todavía no has guardado ninguna cotización."}
         </div>
         <div style={{ fontSize: 12, marginTop: 6 }}>En 💵 Cotizar, dale "💾 Guardar cotización" para que empiece a aparecer aquí.</div>
+        {cotIdFiltro && onLimpiarFiltro && (
+          <button onClick={onLimpiarFiltro}
+            style={{ marginTop: 12, background: "none", border: `1.5px solid ${C.cyan}`, color: C.cyan,
+              borderRadius: 7, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            Ver todas las cotizaciones
+          </button>
+        )}
       </div>
     );
   }
@@ -4554,6 +4562,18 @@ function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
           <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
             placeholder="Buscar por folio, proyecto o cliente…" style={{ ...inputStyle, marginBottom: 14 }} />
         </>
+      )}
+      {cotIdFiltro && onLimpiarFiltro && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy }}>
+            📈 Historial de este folio
+          </div>
+          <button onClick={onLimpiarFiltro}
+            style={{ background: "none", border: `1.5px solid ${C.cyan}`, color: C.cyan, borderRadius: 7,
+              padding: "4px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+            Ver todas
+          </button>
+        </div>
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -6094,6 +6114,8 @@ function SolicitudCotizacion({ onGuardar }) {
   // Sube a Supabase el cronograma y el historial que hayan quedado en este
   // navegador. Corre una sola vez por navegador y no borra nada local.
   const [avisoMigracion, setAvisoMigracion] = useState(null);
+  // Folio al que se filtra el historial cuando se llega desde 💵 Cotizar.
+  const [historialFiltro, setHistorialFiltro] = useState(null);
   useEffect(() => {
     migrarLocalStorageASupabase().then(r => {
       if (r && (r.cronoSubidos || r.historialSubidos || r.error)) setAvisoMigracion(r);
@@ -7006,6 +7028,7 @@ export default function App() {
     { key: "envio",      label: "✉ Enviar solicitud"  },
     { key: "cotizar",    label: "💵 Cotizar"          },
     { key: "seg",        label: "📋 Seguimiento"       },
+    { key: "historial",  label: "📈 Historial precios" },
     { key: "cronograma", label: "📅 Cronograma"        },
     { key: "ajustes",    label: "⚙ Ajustes"           },
   ];
@@ -7109,7 +7132,8 @@ export default function App() {
             )}
           </>
         )}
-        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} onTiempoEstimado={setTiempoEstimado} onProveedoresUsados={setProveedoresCotizacion} />}
+        {tab === "cotizar"   && <Cotizador cotizacion={cotizacion} calcData={calcData} onTiempoEstimado={setTiempoEstimado} onProveedoresUsados={setProveedoresCotizacion}
+          onVerHistorial={() => { setHistorialFiltro(cotizacion?.cot_id || null); setTab("historial"); }} />}
         {tab === "envio" && (
           <>
             <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} tiempoEstimado={tiempoEstimado} proveedoresCotizacion={proveedoresCotizacion} />
@@ -7121,6 +7145,7 @@ export default function App() {
           </>
         )}
         {tab === "seg"       && <Seguimiento />}
+        {tab === "historial" && <HistorialPreciosCotizaciones cotIdFiltro={historialFiltro} onLimpiarFiltro={() => setHistorialFiltro(null)} />}
         {tab === "cronograma" && <CronogramaGeneral />}
         {tab === "ajustes" && <Ajustes />}
       </div>
