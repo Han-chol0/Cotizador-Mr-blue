@@ -504,6 +504,58 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
 // ── Catálogo de servicios: ahora vive en Supabase (tabla servicios_catalogo),
 // no en el código. Agregar/editar/quitar categorías o servicios se hace desde
 // el Table Editor de Supabase y aparece aquí automáticamente.
+// ─── Configuración compartida del equipo ────────────────────────────────────
+// Vive en Supabase (tabla `configuracion`, clave/valor) para que sea la misma
+// en todas las computadoras. localStorage se usa solo como caché, para que la
+// pantalla no parpadee con el valor por defecto mientras responde la red, y
+// para seguir funcionando si Supabase no contesta.
+// OJO: aquí NO van secretos (API keys) — cualquiera con la llave pública podría
+// leerlos. Esos se quedan en localStorage de cada quien.
+const CONFIG_DEFAULTS = { tasa_indirecto: "5" };
+const cfgKeyLocal = (clave) => "mrblue_cfg_" + clave;
+
+function getConfigLocal(clave) {
+  const v = localStorage.getItem(cfgKeyLocal(clave));
+  if (v != null) return v;
+  // Compatibilidad con la versión anterior, que guardaba con otra llave.
+  const viejo = localStorage.getItem("mrblue_tasa_indirecto");
+  if (clave === "tasa_indirecto" && viejo != null) return viejo;
+  return CONFIG_DEFAULTS[clave] ?? "";
+}
+
+async function loadConfigDB() {
+  const { data, error } = await supabase.from("configuracion").select("clave, valor");
+  if (error) { console.warn("No se pudo leer la configuración compartida:", error.message); return null; }
+  const out = {};
+  (data || []).forEach(r => { out[r.clave] = r.valor; });
+  return out;
+}
+
+async function saveConfigDB(clave, valor) {
+  const { error } = await supabase
+    .from("configuracion")
+    .upsert({ clave, valor: String(valor), updated_at: new Date().toISOString() }, { onConflict: "clave" });
+  if (error) { console.error(error); return error.message; }
+  localStorage.setItem(cfgKeyLocal(clave), String(valor));
+  return null;
+}
+
+// Lee una configuración: arranca con el caché local y se actualiza cuando
+// responde Supabase. Devuelve [valor, cargando].
+function useConfig(clave) {
+  const [valor, setValor] = useState(() => getConfigLocal(clave));
+  useEffect(() => {
+    let vivo = true;
+    loadConfigDB().then(cfg => {
+      if (!vivo || !cfg || cfg[clave] == null) return;
+      localStorage.setItem(cfgKeyLocal(clave), cfg[clave]);
+      setValor(cfg[clave]);
+    });
+    return () => { vivo = false; };
+  }, [clave]);
+  return valor;
+}
+
 async function loadServiciosCatalogo() {
   const { data, error } = await supabase
     .from("servicios_catalogo")
@@ -646,41 +698,161 @@ function normalizarTexto(s) {
   return (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-// ── Cronograma general: lista de trabajos activos, guardada en localStorage ──
-// (igual que el resto del historial de este Cotizador, vive en este navegador).
+// ── Cronograma general: trabajos activos, en Supabase ───────────────────────
+// Vive en la tabla `cronograma_trabajos` para que todo el equipo vea lo mismo.
+// Antes estaba en localStorage; esa llave se sigue leyendo una sola vez para
+// subir lo que ya tenías (ver migrarLocalStorageASupabase).
 const CRONOGRAMA_KEY = "mrblue_cronograma_trabajos";
-function loadCronogramaTrabajos() {
-  try { return JSON.parse(localStorage.getItem(CRONOGRAMA_KEY) || "[]"); } catch { return []; }
-}
-function saveCronogramaTrabajos(lista) {
-  localStorage.setItem(CRONOGRAMA_KEY, JSON.stringify(lista));
-}
-// Agrega o actualiza (por id) un trabajo en el cronograma general.
-function upsertCronogramaTrabajo(trabajo) {
-  const lista = loadCronogramaTrabajos();
-  const idx = lista.findIndex(t => t.id === trabajo.id);
-  if (idx >= 0) lista[idx] = trabajo; else lista.push(trabajo);
-  saveCronogramaTrabajos(lista);
-  return lista;
+
+// Convierte el renglón de Supabase al objeto que usa la app (camelCase).
+function filaACronograma(r) {
+  return {
+    id: r.id,
+    nombre: r.nombre || "",
+    cliente: r.cliente || "",
+    fechaInicio: r.fecha_inicio || null,
+    fechaEntregaEstimada: r.fecha_entrega_estimada || null,
+    horasTotales: r.horas_totales ?? null,
+    proveedoresUsados: r.proveedores_usados || [],
+    pasos: r.pasos || [],
+    completado: !!r.completado,
+    fechaRealEntrega: r.fecha_real_entrega || null,
+    actualizado: r.actualizado || null,
+  };
 }
 
-// ── Historial de precios cotizados: cada vez que guardas una cotización con
-// precios en 💵 Cotizar queda un registro aquí, ligado al mismo cot_id/folio de
-// la solicitud — así puedes ver cómo cambiaron los precios de un mismo trabajo
-// con el tiempo. Vive en localStorage, igual que el resto del historial.
+function cronogramaAFila(t) {
+  return {
+    id: t.id,
+    nombre: t.nombre || null,
+    cliente: t.cliente || null,
+    fecha_inicio: t.fechaInicio || null,
+    fecha_entrega_estimada: t.fechaEntregaEstimada || null,
+    horas_totales: t.horasTotales ?? null,
+    proveedores_usados: t.proveedoresUsados || [],
+    pasos: t.pasos || [],
+    completado: !!t.completado,
+    fecha_real_entrega: t.fechaRealEntrega || null,
+    actualizado: t.actualizado || new Date().toISOString(),
+    creado_por: getUsuario() || null,
+  };
+}
+
+async function loadCronogramaTrabajos() {
+  const { data, error } = await supabase
+    .from("cronograma_trabajos").select("*").order("actualizado", { ascending: false });
+  if (error) { console.error("No se pudo leer el cronograma:", error.message); return []; }
+  return (data || []).map(filaACronograma);
+}
+
+// Agrega o actualiza un trabajo. Devuelve { error } para poder avisarle al usuario.
+async function upsertCronogramaTrabajo(trabajo) {
+  const { error } = await supabase
+    .from("cronograma_trabajos").upsert(cronogramaAFila(trabajo), { onConflict: "id" });
+  if (error) console.error("No se pudo guardar en el cronograma:", error.message);
+  return { error: error?.message || null };
+}
+
+async function borrarCronogramaTrabajo(id) {
+  const { error } = await supabase.from("cronograma_trabajos").delete().eq("id", id);
+  if (error) console.error("No se pudo borrar del cronograma:", error.message);
+  return { error: error?.message || null };
+}
+
+// ── Historial de precios cotizados, en Supabase ─────────────────────────────
+// Cada vez que guardas una cotización con precios queda un registro, ligado al
+// mismo cot_id/folio, para ver cómo cambiaron los precios del mismo trabajo.
 const HISTORIAL_PRECIOS_KEY = "mrblue_historial_precios";
-function loadHistorialPrecios() {
-  try { return JSON.parse(localStorage.getItem(HISTORIAL_PRECIOS_KEY) || "[]"); } catch { return []; }
+
+function filaAHistorial(r) {
+  return {
+    id: r.id, cot_id: r.cot_id, folio: r.folio, nombre: r.nombre, cliente: r.cliente,
+    fecha: r.fecha, tipo: r.tipo, qty: r.qty, pliegos: r.pliegos,
+    desglose: r.desglose || [],
+    costoTotal: r.costo_total, margenPct: r.margen_pct,
+    precioVenta: r.precio_venta, utilidad: r.utilidad,
+    precioRealProveedor: r.precio_real_proveedor,
+    proveedoresUsados: r.proveedores_usados || [],
+  };
 }
-function guardarSnapshotPrecio(entrada) {
-  const lista = loadHistorialPrecios();
-  lista.push(entrada);
-  localStorage.setItem(HISTORIAL_PRECIOS_KEY, JSON.stringify(lista));
-  return lista;
+
+function historialAFila(h) {
+  return {
+    id: h.id, cot_id: h.cot_id || null, folio: h.folio || null,
+    nombre: h.nombre || null, cliente: h.cliente || null,
+    fecha: h.fecha || new Date().toISOString(), tipo: h.tipo || null,
+    qty: h.qty ?? null, pliegos: h.pliegos ?? null,
+    desglose: h.desglose || [],
+    costo_total: h.costoTotal ?? null, margen_pct: h.margenPct ?? null,
+    precio_venta: h.precioVenta ?? null, utilidad: h.utilidad ?? null,
+    precio_real_proveedor: h.precioRealProveedor ?? null,
+    proveedores_usados: h.proveedoresUsados || [],
+    creado_por: getUsuario() || null,
+  };
 }
-function historialPreciosDe(cotId) {
-  return loadHistorialPrecios().filter(h => h.cot_id === cotId).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+
+async function loadHistorialPrecios() {
+  const { data, error } = await supabase
+    .from("historial_precios").select("*").order("fecha", { ascending: false });
+  if (error) { console.error("No se pudo leer el historial de precios:", error.message); return []; }
+  return (data || []).map(filaAHistorial);
 }
+
+async function guardarSnapshotPrecio(entrada) {
+  const { error } = await supabase.from("historial_precios").insert(historialAFila(entrada));
+  if (error) console.error("No se pudo guardar el precio en el historial:", error.message);
+  return { error: error?.message || null };
+}
+
+async function historialPreciosDe(cotId) {
+  const { data, error } = await supabase
+    .from("historial_precios").select("*").eq("cot_id", cotId).order("fecha", { ascending: false });
+  if (error) { console.error(error.message); return []; }
+  return (data || []).map(filaAHistorial);
+}
+
+// ── Migración única desde localStorage ──────────────────────────────────────
+// Sube lo que cada quien tenga guardado en su navegador y deja una marca para
+// no repetirlo. No borra el localStorage: si algo sale mal, los datos siguen
+// ahí para intentar de nuevo. Sube solo lo que no exista ya en la tabla.
+const MIGRACION_KEY = "mrblue_migracion_supabase_v1";
+
+async function migrarLocalStorageASupabase() {
+  if (localStorage.getItem(MIGRACION_KEY)) return null;
+  let cronoSubidos = 0, historialSubidos = 0;
+  try {
+    const cronoLocal = JSON.parse(localStorage.getItem(CRONOGRAMA_KEY) || "[]");
+    if (cronoLocal.length) {
+      const { data: yaEstan } = await supabase.from("cronograma_trabajos").select("id");
+      const existentes = new Set((yaEstan || []).map(r => r.id));
+      const faltantes = cronoLocal.filter(t => t.id && !existentes.has(t.id)).map(cronogramaAFila);
+      if (faltantes.length) {
+        const { error } = await supabase.from("cronograma_trabajos").insert(faltantes);
+        if (error) throw new Error("cronograma: " + error.message);
+        cronoSubidos = faltantes.length;
+      }
+    }
+
+    const histLocal = JSON.parse(localStorage.getItem(HISTORIAL_PRECIOS_KEY) || "[]");
+    if (histLocal.length) {
+      const { data: yaEstan } = await supabase.from("historial_precios").select("id");
+      const existentes = new Set((yaEstan || []).map(r => r.id));
+      const faltantes = histLocal.filter(h => h.id && !existentes.has(h.id)).map(historialAFila);
+      if (faltantes.length) {
+        const { error } = await supabase.from("historial_precios").insert(faltantes);
+        if (error) throw new Error("historial: " + error.message);
+        historialSubidos = faltantes.length;
+      }
+    }
+
+    localStorage.setItem(MIGRACION_KEY, new Date().toISOString());
+    return { cronoSubidos, historialSubidos, error: null };
+  } catch (e) {
+    console.error("Falló la migración a Supabase:", e.message);
+    return { cronoSubidos, historialSubidos, error: e.message };
+  }
+}
+
 
 // ── Tabla de merma para cotizar (Anexo 6, Manual de Procedimientos — Proceso Comercial) ──
 // Para tirajes chicos es un número fijo de hojas; para los demás rangos es un %, y
@@ -3109,6 +3281,18 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const [realesPorLinea, setRealesPorLinea] = useState({});
   const [extras, setExtras] = useState("");
   const [margen, setMargen] = useState("35");
+  const tasaIndirectoCfg = useConfig("tasa_indirecto");
+  // Trabajos ya agendados, para avisar si un proveedor se traslapa. Se cargan
+  // una vez porque se consultan durante el render.
+  const [cronogramaTrabajos, setCronogramaTrabajos] = useState([]);
+  useEffect(() => { loadCronogramaTrabajos().then(setCronogramaTrabajos); }, []);
+  // Historial de precios de este folio, para la tarjeta de abajo.
+  const [historialFolio, setHistorialFolio] = useState([]);
+  const [errorGuardadoCot, setErrorGuardadoCot] = useState("");
+  useEffect(() => {
+    const cotId = cotizacion?.cot_id || trabajoIdRef.current;
+    historialPreciosDe(cotId).then(setHistorialFolio);
+  }, [cotizacion?.cot_id]);
 
   // Merma extra por acabado: +50 pliegos por cada proceso de acabado que lleve el
   // trabajo (barniz máquina, laminado, cualquier acabado manual), según tu tabla.
@@ -3184,7 +3368,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const proveedorOcupadoEn = (provId, rango) => {
     if (!rango || !rango.inicio || !rango.fin) return null;
     const miId = cotizacion?.cot_id || trabajoIdRef.current;
-    const otros = loadCronogramaTrabajos().filter(t => t.id !== miId && (t.proveedoresUsados || []).some(pu => pu.id === provId));
+    const otros = cronogramaTrabajos.filter(t => t.id !== miId && (t.proveedoresUsados || []).some(pu => pu.id === provId));
     const conflicto = otros.find(t => {
       const ti = new Date(t.fechaInicio + "T08:00:00").getTime();
       const tf = new Date(t.fechaEntregaEstimada).getTime();
@@ -3287,7 +3471,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const costoDirecto = subtotalAntesDeUrgencia + costoUrgencia;
   // Gasto indirecto: prorrateo de operación fija (renta, contabilidad, software, etc.),
   // configurable en ⚙ Ajustes → 💰 Costos. Se aplica sobre el costo directo, antes del margen.
-  const tasaIndirectoPct = parseFloat(localStorage.getItem("mrblue_tasa_indirecto")) || 5;
+  // La tasa es compartida por el equipo (Supabase), no local de cada navegador.
+  const tasaIndirectoPct = parseFloat(tasaIndirectoCfg) || 0;
   const gastoIndirecto = costoDirecto * (tasaIndirectoPct / 100);
   const costoTotal = costoDirecto + gastoIndirecto;
 
@@ -4021,10 +4206,10 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
         <button onClick={copiarDesglose} disabled={costoTotal <= 0} style={{ ...btn(costoTotal > 0 ? C.coral : C.muted, true), flex: 1 }}>
           📋 Copiar desglose
         </button>
-        <button onClick={() => {
+        <button onClick={async () => {
           const cotId = cotizacion?.cot_id || trabajoIdRef.current;
           const folioMostrado = cotizacion?.folio || ("SIN-FOLIO-" + cotId.slice(0, 8).toUpperCase());
-          guardarSnapshotPrecio({
+          const { error } = await guardarSnapshotPrecio({
             id: crypto.randomUUID(), cot_id: cotId, folio: folioMostrado,
             nombre: cotizacion?.nombre_proyecto || "Cotización sin nombre",
             cliente: cotizacion?.cliente || "",
@@ -4036,6 +4221,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
             costoTotal, margenPct: parseFloat(margen) || 0, precioVenta, utilidad,
             precioRealProveedor: desgloseArr.reduce((a, r) => a + (parseFloat(realesPorLinea[r.label]) || 0), 0) || null,
           });
+          if (error) { setErrorGuardadoCot(error); return; }
+          setErrorGuardadoCot("");
+          historialPreciosDe(cotId).then(setHistorialFolio);
           setGuardadoPrecio(true);
           setTimeout(() => setGuardadoPrecio(false), 2000);
         }} disabled={costoTotal <= 0} style={{ ...btn(costoTotal > 0 ? (guardadoPrecio ? C.green : C.navy) : C.muted, true), flex: 1 }}>
@@ -4043,9 +4231,14 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
         </button>
       </div>
 
+      {errorGuardadoCot && (
+        <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 12px", fontSize: 12, color: C.red, marginTop: 8 }}>
+          ⚠ No se pudo guardar la cotización: {errorGuardadoCot}
+        </div>
+      )}
+
       {(() => {
-        const cotId = cotizacion?.cot_id || trabajoIdRef.current;
-        const hist = historialPreciosDe(cotId);
+        const hist = historialFolio;
         if (hist.length === 0) return null;
         return (
           <div style={{ ...cardStyle, marginTop: 12 }}>
@@ -4105,7 +4298,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
             Esto es para cuando el trabajo <b>ya es un pedido confirmado</b> (no solo una cotización) — entra al cronograma para dar seguimiento a la producción real.
           </div>
-          <button onClick={() => {
+          <button onClick={async () => {
             const id = cotizacion?.cot_id || trabajoIdRef.current;
             const proveedoresUsados = [];
             const addProv = (pidCompuesto) => {
@@ -4117,7 +4310,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
             };
             addProv(papelProvId); addProv(impProvId); addProv(colorExtraProvId); addProv(barnizProvId);
             // Los acabados ahora son manuales (sin proveedor propio) — no aportan al cronograma de proveedores.
-            upsertCronogramaTrabajo({
+            const rCrono = await upsertCronogramaTrabajo({
               id,
               nombre: cotizacion?.nombre_proyecto || "Cotización sin nombre",
               cliente: cotizacion?.cliente || "",
@@ -4128,11 +4321,12 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
               pasos: pasosConFechas.map(p => ({ nombre: p.nombre, inicio: p.inicio?.toISOString(), fin: p.fin?.toISOString() })),
               actualizado: new Date().toISOString(),
             });
+            if (rCrono.error) { setErrorGuardadoCot(rCrono.error); return; }
             // Deja también un registro fijo en el historial de precios, marcado como
             // la compra real confirmada (a diferencia de las cotizaciones anteriores
             // del mismo folio, que solo eran comparaciones).
             const folioMostrado = cotizacion?.folio || ("SIN-FOLIO-" + id.slice(0, 8).toUpperCase());
-            guardarSnapshotPrecio({
+            await guardarSnapshotPrecio({
               id: crypto.randomUUID(), cot_id: id, folio: folioMostrado,
               nombre: cotizacion?.nombre_proyecto || "Cotización sin nombre",
               cliente: cotizacion?.cliente || "",
@@ -4145,6 +4339,9 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
               precioRealProveedor: desgloseArr.reduce((a, r) => a + (parseFloat(realesPorLinea[r.label]) || 0), 0) || null,
               proveedoresUsados,
             });
+            setErrorGuardadoCot("");
+            loadCronogramaTrabajos().then(setCronogramaTrabajos);
+            historialPreciosDe(id).then(setHistorialFolio);
             setGuardadoCronograma(true);
             setTimeout(() => setGuardadoCronograma(false), 2000);
           }} style={{ ...btn(guardadoCronograma ? C.green : C.navy, true), marginTop: 6, width: "100%" }}>
@@ -4305,9 +4502,13 @@ function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
   const money = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const [busqueda, setBusqueda] = useState("");
   const [abierto, setAbierto] = useState(cotIdFiltro || null); // cot_id expandido
-  const todas = cotIdFiltro
-    ? loadHistorialPrecios().filter(h => h.cot_id === cotIdFiltro)
-    : loadHistorialPrecios();
+  const [historial, setHistorial] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  useEffect(() => {
+    setCargando(true);
+    loadHistorialPrecios().then(lista => { setHistorial(lista); setCargando(false); });
+  }, []);
+  const todas = cotIdFiltro ? historial.filter(h => h.cot_id === cotIdFiltro) : historial;
 
   // Agrupa por cot_id, más reciente primero dentro de cada grupo y entre grupos.
   const grupos = {};
@@ -4443,19 +4644,33 @@ function HistorialPreciosCotizaciones({ cotIdFiltro = null }) {
 }
 
 function CronogramaGeneral() {
-  const [trabajos, setTrabajos] = useState(() => loadCronogramaTrabajos());
+  const [trabajos, setTrabajos] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [errorCrono, setErrorCrono] = useState("");
   const [registrando, setRegistrando] = useState(null); // trabajo actual siendo calificado
 
-  const quitar = (id) => {
-    const nuevo = trabajos.filter(t => t.id !== id);
-    setTrabajos(nuevo);
-    saveCronogramaTrabajos(nuevo);
+  const recargar = () => loadCronogramaTrabajos().then(l => { setTrabajos(l); setCargando(false); });
+  useEffect(() => { recargar(); }, []);
+
+  const quitar = async (id) => {
+    if (!window.confirm("¿Quitar este trabajo del cronograma?\n\nSe borra para todo el equipo.")) return;
+    // Optimista: se ve inmediato y se revierte si Supabase rechaza.
+    const previos = trabajos;
+    setTrabajos(trabajos.filter(t => t.id !== id));
+    const { error } = await borrarCronogramaTrabajo(id);
+    if (error) { setTrabajos(previos); setErrorCrono("No se pudo quitar: " + error); }
+    else setErrorCrono("");
   };
 
-  const marcarCompletado = (id, fechaRealEntrega) => {
-    const nuevo = trabajos.map(t => t.id === id ? { ...t, completado: true, fechaRealEntrega } : t);
-    setTrabajos(nuevo);
-    saveCronogramaTrabajos(nuevo);
+  const marcarCompletado = async (id, fechaRealEntrega) => {
+    const trabajo = trabajos.find(t => t.id === id);
+    if (!trabajo) return;
+    const actualizado = { ...trabajo, completado: true, fechaRealEntrega, actualizado: new Date().toISOString() };
+    const previos = trabajos;
+    setTrabajos(trabajos.map(t => t.id === id ? actualizado : t));
+    const { error } = await upsertCronogramaTrabajo(actualizado);
+    if (error) { setTrabajos(previos); setErrorCrono("No se pudo marcar como entregado: " + error); }
+    else setErrorCrono("");
   };
 
   const activos = trabajos.filter(t => t.fechaInicio && t.fechaEntregaEstimada && !t.completado);
@@ -4492,6 +4707,15 @@ function CronogramaGeneral() {
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: C.navy }}>📅 Cronograma general</div>
         {activos.length > 0 && <div style={{ fontSize: 12, color: C.muted }}>{fmtCorto(rangeMin)} — {fmtCorto(rangeMax)}</div>}
       </div>
+
+      {cargando && (
+        <div style={{ color: C.muted, fontSize: 13, textAlign: "center", padding: 20 }}>Cargando cronograma…</div>
+      )}
+      {errorCrono && (
+        <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "9px 12px", fontSize: 12, color: C.red, marginBottom: 12 }}>
+          ⚠ {errorCrono}
+        </div>
+      )}
 
       {activos.length > 0 && (
         <div style={cardStyle}>
@@ -5104,7 +5328,39 @@ function Ajustes() {
   const [resendKey, setResendKey] = useState(() => localStorage.getItem("mrblue_resend_key") || "");
   const [fromEmail, setFromEmail] = useState(() => localStorage.getItem("mrblue_from_email") || "");
 
-  const [tasaIndirecto, setTasaIndirecto] = useState(() => localStorage.getItem("mrblue_tasa_indirecto") || "5");
+  const [tasaIndirecto, setTasaIndirecto] = useState(() => getConfigLocal("tasa_indirecto"));
+  const [guardandoTasa, setGuardandoTasa] = useState(false);
+  const [tasaGuardada, setTasaGuardada] = useState(false);
+  const [errorTasa, setErrorTasa] = useState("");
+
+  // Al abrir Ajustes se trae el valor real del equipo, por si otro lo cambió.
+  useEffect(() => {
+    loadConfigDB().then(cfg => {
+      if (cfg && cfg.tasa_indirecto != null) setTasaIndirecto(cfg.tasa_indirecto);
+    });
+  }, []);
+
+  const guardarTasa = async () => {
+    const n = parseFloat(tasaIndirecto);
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+      setErrorTasa("La tasa debe ser un número entre 0 y 100.");
+      return;
+    }
+    setGuardandoTasa(true);
+    setErrorTasa("");
+    const err = await saveConfigDB("tasa_indirecto", n);
+    setGuardandoTasa(false);
+    if (err) {
+      setErrorTasa(
+        /relation|does not exist/i.test(err)
+          ? 'Falta la tabla "configuracion" en Supabase — corre el SQL que viene en las notas del cambio.'
+          : "No se pudo guardar: " + err
+      );
+      return;
+    }
+    setTasaGuardada(true);
+    setTimeout(() => setTasaGuardada(false), 3000);
+  };
 
   const secciones = [
     { key: "general",     label: "⚙ General"      },
@@ -5172,11 +5428,23 @@ function Ajustes() {
               💰 Gasto indirecto (prorrateo de operación fija)
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <div style={{ maxWidth: 220 }}>
-                <label style={labelStyle}>Tasa de gasto indirecto (%)</label>
-                <input value={tasaIndirecto} onChange={e => { setTasaIndirecto(e.target.value); localStorage.setItem("mrblue_tasa_indirecto", e.target.value); }}
-                  type="number" step="0.01" placeholder="5.00" style={inputStyle} />
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div style={{ maxWidth: 220, flex: "0 0 220px" }}>
+                  <label style={labelStyle}>Tasa de gasto indirecto (%)</label>
+                  <input value={tasaIndirecto}
+                    onChange={e => { setTasaIndirecto(e.target.value); setTasaGuardada(false); setErrorTasa(""); }}
+                    type="number" step="0.01" placeholder="5.00" style={inputStyle} />
+                </div>
+                <button onClick={guardarTasa} disabled={guardandoTasa}
+                  style={{ ...btn(tasaGuardada ? C.green : C.cyan), opacity: guardandoTasa ? 0.6 : 1, marginBottom: 0 }}>
+                  {guardandoTasa ? "Guardando…" : tasaGuardada ? "✓ Guardada para el equipo" : "Guardar"}
+                </button>
               </div>
+              {errorTasa && (
+                <div style={{ background: "#FEF2F2", border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "8px 12px", fontSize: 11.5, color: C.red }}>
+                  ⚠ {errorTasa}
+                </div>
+              )}
               <div style={{ fontSize: 11, color: C.muted }}>
                 Se aplica automático sobre el costo directo de cada cotización en 💵 Cotizar, antes del margen — cubre
                 renta, contabilidad, software, transporte y demás operación fija del estudio. Calibrado con datos
@@ -5185,7 +5453,8 @@ function Ajustes() {
             </div>
           </div>
           <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>
-            Esto se guarda en este navegador (localStorage) — si abres el Cotizador desde otra computadora, captúralo de nuevo ahí.
+            Esta tasa se guarda en Supabase, así que aplica para todo el equipo — si Remedios abre el Cotizador desde
+            su computadora, va a usar la misma. Los cambios se reflejan al recargar.
           </div>
         </>
       )}
@@ -5822,6 +6091,14 @@ function SolicitudCotizacion({ onGuardar }) {
   const [cargandoDeSupabase, setCargandoDeSupabase] = useState(false);
   const [sincronizando, setSincronizando] = useState(false);
   const [syncError, setSyncError] = useState(null);
+  // Sube a Supabase el cronograma y el historial que hayan quedado en este
+  // navegador. Corre una sola vez por navegador y no borra nada local.
+  const [avisoMigracion, setAvisoMigracion] = useState(null);
+  useEffect(() => {
+    migrarLocalStorageASupabase().then(r => {
+      if (r && (r.cronoSubidos || r.historialSubidos || r.error)) setAvisoMigracion(r);
+    });
+  }, []);
 
   // ── Prioridad más alta: ?cot_id=UUID en la URL (llega vía Make → Supabase) ──
   // Se resuelve async, así que corre en un efecto y sobreescribe lo que sea
@@ -5924,6 +6201,20 @@ function SolicitudCotizacion({ onGuardar }) {
 
   return (
     <div>
+      {avisoMigracion && (
+        <div style={{ background: avisoMigracion.error ? "#FEF2F2" : "#EAF7EE",
+          border: `1.5px solid ${avisoMigracion.error ? C.red : C.green}`, borderRadius: 8,
+          padding: "9px 14px", marginBottom: 12, fontSize: 12, color: avisoMigracion.error ? C.red : C.navy,
+          display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ flex: 1 }}>
+            {avisoMigracion.error
+              ? `⚠ No se pudo subir todo lo que tenías guardado en este navegador (${avisoMigracion.error}). Tus datos locales siguen intactos — se reintentará al recargar.`
+              : `✓ Se subieron a la nube ${avisoMigracion.cronoSubidos} trabajo${avisoMigracion.cronoSubidos === 1 ? "" : "s"} del cronograma y ${avisoMigracion.historialSubidos} registro${avisoMigracion.historialSubidos === 1 ? "" : "s"} de precios que estaban solo en este navegador. Ahora los ve todo el equipo.`}
+          </span>
+          <button onClick={() => setAvisoMigracion(null)}
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "inherit", opacity: 0.6 }}>×</button>
+        </div>
+      )}
       {cargandoDeSupabase && (
         <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: "9px 14px", marginBottom: 12, fontSize: 12, fontWeight: 700, color: C.navy }}>
           ⏳ Cargando datos de la solicitud desde ClickUp…
