@@ -9,6 +9,22 @@ import PDFDocument from "pdfkit";
 import "pdfkit/standard-fonts/Helvetica";
 import "pdfkit/standard-fonts/HelveticaBold";
 import "pdfkit/standard-fonts/HelveticaOblique";
+import { PLEX_REGULAR_B64, PLEX_BOLD_B64, PLEX_LIGHT_B64, PLEX_ITALIC_B64 } from "./_fuentes.js";
+
+// IBM Plex Mono va embebida en base64 para que no dependa de que el
+// empaquetador incluya archivos sueltos — que es justo lo que falló con las
+// fuentes de pdfkit. Los nombres FUENTE/FUENTE_BOLD se usan en todo el
+// documento, así que cambiar de tipografía es cambiar estas dos constantes.
+const FUENTE = "Plex";
+const FUENTE_BOLD = "PlexBold";
+const FUENTE_LIGHT = "PlexLight";
+const FUENTE_ITALIC = "PlexItalic";
+function registrarFuentes(doc) {
+  doc.registerFont(FUENTE, Buffer.from(PLEX_REGULAR_B64, "base64"));
+  doc.registerFont(FUENTE_BOLD, Buffer.from(PLEX_BOLD_B64, "base64"));
+  doc.registerFont(FUENTE_LIGHT, Buffer.from(PLEX_LIGHT_B64, "base64"));
+  doc.registerFont(FUENTE_ITALIC, Buffer.from(PLEX_ITALIC_B64, "base64"));
+}
 
 const NAVY = "#1E3A5F";
 const CYAN = "#0095D4";
@@ -25,6 +41,7 @@ const money3 = (v) =>
 function construirPDF(d) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "LETTER", margin: 48 });
+    registrarFuentes(doc);
     const chunks = [];
     doc.on("data", c => chunks.push(c));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
@@ -35,9 +52,9 @@ function construirPDF(d) {
     const ancho = R - L;
 
     // ── Encabezado ──────────────────────────────────────────────────────────
-    doc.font("Helvetica-Bold").fontSize(20).fillColor(NAVY)
+    doc.font(FUENTE_BOLD).fontSize(20).fillColor(NAVY)
        .text("FORMATO DE COSTEO", L, 50);
-    doc.font("Helvetica").fontSize(10).fillColor(GRIS)
+    doc.font(FUENTE_LIGHT).fontSize(10).fillColor(GRIS)
        .text("Mr. Blue · Laboratorios Creativos", L, 74);
 
     // ── Datos generales (etiqueta a la derecha, valor a la izquierda) ───────
@@ -46,13 +63,13 @@ function construirPDF(d) {
     const W_VALOR = R - X_VALOR;
     const filaDato = (etiqueta, valor) => {
       const txt = String(valor || "—");
-      doc.font("Helvetica").fontSize(9);
+      doc.font(FUENTE).fontSize(9);
       // El proyecto puede ser largo y envolverse en dos líneas: se mide antes
       // para que el siguiente renglón no se le encime.
       const alto = Math.max(15, doc.heightOfString(txt, { width: W_VALOR }) + 4);
-      doc.font("Helvetica-Bold").fontSize(9).fillColor(GRIS)
+      doc.font(FUENTE_BOLD).fontSize(9).fillColor(GRIS)
          .text(etiqueta, L + 150, y, { width: 110, align: "right" });
-      doc.font("Helvetica").fontSize(9).fillColor("#1A1A1A")
+      doc.font(FUENTE).fontSize(9).fillColor("#1A1A1A")
          .text(txt, X_VALOR, y, { width: W_VALOR });
       y += alto;
     };
@@ -64,7 +81,7 @@ function construirPDF(d) {
 
     // ── Especificaciones ────────────────────────────────────────────────────
     y += 12;
-    doc.font("Helvetica-Bold").fontSize(11).fillColor(NAVY).text("ESPECIFICACIONES", L + 150, y);
+    doc.font(FUENTE_BOLD).fontSize(11).fillColor(NAVY).text("ESPECIFICACIONES", L + 150, y);
     doc.moveTo(L + 150, y + 14).lineTo(L + 300, y + 14).strokeColor(NAVY).lineWidth(0.8).stroke();
     y += 24;
     filaDato("Cant. Solicitada:", d.cantidad);
@@ -74,33 +91,33 @@ function construirPDF(d) {
 
     // ── Costeo ──────────────────────────────────────────────────────────────
     y += 14;
-    doc.font("Helvetica-Bold").fontSize(11).fillColor(NAVY).text("COSTEO", L + 150, y);
+    doc.font(FUENTE_BOLD).fontSize(11).fillColor(NAVY).text("COSTEO", L + 150, y);
     doc.moveTo(L + 150, y + 14).lineTo(L + 240, y + 14).strokeColor(NAVY).lineWidth(0.8).stroke();
     y += 24;
 
     (d.lineas || []).forEach(ln => {
-      doc.font("Helvetica").fontSize(9).fillColor(GRIS)
+      doc.font(FUENTE_LIGHT).fontSize(9).fillColor(GRIS)
          .text(String(ln.label).toUpperCase(), L + 100, y, { width: 160, align: "right" });
-      doc.font("Helvetica").fontSize(9).fillColor("#1A1A1A")
+      doc.font(FUENTE).fontSize(9).fillColor("#1A1A1A")
          .text(ln.monto ? money(ln.monto) : "-", L + 270, y, { width: 90, align: "right" });
       y += 14;
     });
 
     // Costo total resaltado
     doc.rect(L + 100, y - 2, 260, 17).fill("#E8E8E8");
-    doc.font("Helvetica-Bold").fontSize(9.5).fillColor(NAVY)
+    doc.font(FUENTE_BOLD).fontSize(9.5).fillColor(NAVY)
        .text("COSTO TOTAL", L + 100, y + 2, { width: 160, align: "right" });
-    doc.font("Helvetica-Bold").fontSize(9.5).fillColor(NAVY)
+    doc.font(FUENTE_BOLD).fontSize(9.5).fillColor(NAVY)
        .text(money(d.costoTotal), L + 270, y + 2, { width: 90, align: "right" });
     y += 20;
-    doc.font("Helvetica").fontSize(9).fillColor(GRIS)
+    doc.font(FUENTE).fontSize(9).fillColor(GRIS)
        .text("P.U.", L + 100, y, { width: 160, align: "right" });
-    doc.font("Helvetica").fontSize(9).fillColor("#1A1A1A")
+    doc.font(FUENTE).fontSize(9).fillColor("#1A1A1A")
        .text(money3(d.costoUnitario), L + 270, y, { width: 90, align: "right" });
     y += 26;
 
     // ── Escalera de precios ─────────────────────────────────────────────────
-    doc.font("Helvetica-Bold").fontSize(9).fillColor(NAVY)
+    doc.font(FUENTE_BOLD).fontSize(9).fillColor(NAVY)
        .text("PROYECTO: " + (d.proyecto || "—"), L, y, { width: ancho });
     y += 16;
 
@@ -122,7 +139,7 @@ function construirPDF(d) {
     doc.rect(x0, y, totalCols, 26).fill(NAVY);
     let x = x0;
     cols.forEach(c => {
-      doc.font("Helvetica-Bold").fontSize(6.8).fillColor("#FFFFFF")
+      doc.font(FUENTE_BOLD).fontSize(6.8).fillColor("#FFFFFF")
          .text(c.t, x + 3, y + 9, { width: c.w - 6, align: c.a });
       x += c.w;
     });
@@ -152,13 +169,13 @@ function construirPDF(d) {
       ];
       x = x0;
       celdas.forEach((txt, j) => {
-        doc.font(j === 2 || (piso && j === 3) ? "Helvetica-Bold" : "Helvetica").fontSize(6.9)
+        doc.font(j === 2 || (piso && j === 3) ? FUENTE_BOLD : FUENTE).fontSize(6.9)
            .fillColor(color)
            .text(txt, x + 3, y + 5, { width: cols[j].w - 6, align: cols[j].a });
         x += cols[j].w;
       });
       if (piso) {
-        doc.font("Helvetica-Bold").fontSize(6.2).fillColor("#8A5A00")
+        doc.font(FUENTE_BOLD).fontSize(6.2).fillColor("#8A5A00")
            .text("PISO", x0 + totalCols + 4, y + 6, { width: 40 });
       }
       doc.moveTo(x0, y + 17).lineTo(x0 + totalCols, y + 17).strokeColor("#E1E8ED").lineWidth(0.5).stroke();
@@ -170,17 +187,17 @@ function construirPDF(d) {
       y += 12;
       doc.rect(x0, y, totalCols, 32).fill("#FFF8E1");
       doc.moveTo(x0, y).lineTo(x0, y + 32).strokeColor("#F39C12").lineWidth(2.5).stroke();
-      doc.font("Helvetica-Bold").fontSize(7.5).fillColor("#8A5A00")
+      doc.font(FUENTE_BOLD).fontSize(7.5).fillColor("#8A5A00")
          .text(`PISO: ${d.pisoMargen.toFixed(2)}% — no cotizar por debajo sin autorización.`,
                x0 + 8, y + 7, { width: totalCols - 16 });
-      doc.font("Helvetica").fontSize(7).fillColor("#8A5A00")
+      doc.font(FUENTE).fontSize(7).fillColor("#8A5A00")
          .text(`Es el margen que, después del ISR (${(d.isrPct ?? 33)}%), deja ${((d.pisoMargen * (1 - (d.isrPct ?? 33) / 100))).toFixed(1)}% neto sobre la venta. "Neto tras ISR" es lo que de verdad queda de cada escalón.`,
                x0 + 8, y + 18, { width: totalCols - 16 });
       y += 38;
     }
 
     if (d.notaIndirecto) {
-      doc.font("Helvetica-Oblique").fontSize(7).fillColor(GRIS)
+      doc.font(FUENTE_ITALIC).fontSize(7).fillColor(GRIS)
          .text(d.notaIndirecto, L, y, { width: ancho });
     }
 
