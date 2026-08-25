@@ -2,13 +2,6 @@
 // la tarea de ClickUp. El token de ClickUp vive en variables de entorno de
 // Vercel (CLICKUP_API_TOKEN) — nunca toca el navegador.
 import PDFDocument from "pdfkit";
-// pdfkit carga las fuentes estándar con un require dinámico, así que el
-// empaquetador de Vercel no las detecta y en producción truena con
-// "Cannot find module .../standard-fonts/Helvetica.cjs". Importarlas aquí las
-// mete al grafo de módulos y quedan incluidas en el deploy.
-import "pdfkit/standard-fonts/Helvetica";
-import "pdfkit/standard-fonts/HelveticaBold";
-import "pdfkit/standard-fonts/HelveticaOblique";
 import { PLEX_REGULAR_B64, PLEX_BOLD_B64, PLEX_LIGHT_B64, PLEX_ITALIC_B64 } from "./_fuentes.js";
 
 // IBM Plex Mono va embebida en base64 para que no dependa de que el
@@ -40,7 +33,11 @@ const money3 = (v) =>
 // Arma el PDF en memoria y lo devuelve como Buffer.
 function construirPDF(d) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "LETTER", margin: 48 });
+    // font: null es indispensable. Sin eso, el constructor de pdfkit carga
+    // Helvetica de inmediato con un require dinámico que el empaquetador de
+    // Vercel no incluye, y truena con "Cannot find module .../Helvetica.cjs"
+    // aunque el documento entero use Plex.
+    const doc = new PDFDocument({ size: "LETTER", margin: 48, font: null });
     registrarFuentes(doc);
     const chunks = [];
     doc.on("data", c => chunks.push(c));
