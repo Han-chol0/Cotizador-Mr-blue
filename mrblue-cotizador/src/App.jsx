@@ -54,12 +54,21 @@ const STANDARD_SHEETS = [
 ];
 
 // ─── Utilidades de storage ───────────────────────────────────────────────────
+// Antes esto usaba window.storage (API que solo existía dentro de Claude.ai y
+// en producción no guardaba nada). Ahora vive en Supabase, tabla kv — llave/valor
+// genérico, compartido por todo el equipo. Guarda Seguimiento y Templates.
 async function storageGet(key) {
-  try { const r = await window.storage.get(key); return r ? JSON.parse(r.value) : null; }
-  catch { return null; }
+  try {
+    const { data, error } = await supabase.from("kv").select("value").eq("key", key).maybeSingle();
+    if (error) { console.error("kv get", key, error); return null; }
+    return data ? data.value : null;
+  } catch { return null; }
 }
 async function storageSet(key, val) {
-  try { await window.storage.set(key, JSON.stringify(val)); } catch {}
+  try {
+    const { error } = await supabase.from("kv").upsert({ key, value: val, updated_at: new Date().toISOString() });
+    if (error) console.error("kv set", key, error);
+  } catch {}
 }
 
 // ─── Leer cotización desde URL (?cot=BASE64) ─────────────────────────────────
@@ -6106,6 +6115,25 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [todosProveedores, setTodosProveedores] = useState([]);
   const [proveedoresElegidos, setProveedoresElegidos] = useState({}); // { [provId]: true } — a quién sí le vas a pedir cotización
   const [refrescarSeg, setRefrescarSeg] = useState(0); // fuerza recarga del seguimiento al enviar
+
+  // Da de alta la solicitud en 📋 Seguimiento cuando contactas a un proveedor por
+  // cualquier canal (correo a todos, cola de WhatsApp, o los botones individuales).
+  // Una sola entrada por proveedor por cotización — repetir el clic no duplica.
+  const registrarSolicitudSeguimiento = async (p, canal) => {
+    try {
+      const existing = await storageGet("solicitudes") || [];
+      const cotId = cotizacion?.cot_id || null;
+      if (existing.some(s => s.proveedor === p.nombre && (s.cot_id || null) === cotId)) return;
+      existing.unshift({
+        id: crypto.randomUUID(), cot_id: cotId,
+        proveedor: p.nombre, email: p.email || "", telefono: p.whatsapp || "",
+        producto: producto || cotizacion?.nombre_proyecto || "Sin nombre", qty: calcData?.qty,
+        fechaEnvio: new Date().toISOString(), status: "enviado", canal: canal || null,
+      });
+      await storageSet("solicitudes", existing);
+      setRefrescarSeg(n => n + 1);
+    } catch (e) { console.error("registrar seguimiento", e); }
+  };
   // Plano Mecánico y otros archivos que se mandan a TODOS los proveedores de esta cotización.
   const claveAdj = claveAdjuntos(cotizacion);
   const [adjuntos, setAdjuntos] = useState(() => {
@@ -6245,6 +6273,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
       if (r?.ok) {
         exitosos++;
         setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
+        await registrarSolicitudSeguimiento(p, "correo");
       } else {
         fallidos++;
         if (!primerError) {
@@ -6277,6 +6306,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     const msg = conLinks(mensajeParaProveedor(p));
     window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, "_blank");
     setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
+    registrarSolicitudSeguimiento(p, "whatsapp");
   };
 
   const siguienteWhatsApp = () => {
@@ -6551,15 +6581,15 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                       </details>
 
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button onClick={() => { navigator.clipboard.writeText(msgConLinks); setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); }}
+                        <button onClick={() => { navigator.clipboard.writeText(msgConLinks); setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); registrarSolicitudSeguimiento(p, "manual"); }}
                           style={{ ...btn(C.navy, true), fontSize: 11, padding: "5px 10px" }}>📋 Copiar mensaje</button>
                         <a href={p.email ? `mailto:${p.email}?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(msgConLinks)}` : undefined}
-                          onClick={() => p.email && setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }))}
+                          onClick={() => { if (p.email) { setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); registrarSolicitudSeguimiento(p, "correo"); } }}
                           style={{ ...btn(p.email ? C.coral : C.muted, true), fontSize: 11, padding: "5px 10px", textDecoration: "none", opacity: p.email ? 1 : 0.5, pointerEvents: p.email ? "auto" : "none" }}>
                           ✉ Abrir correo
                         </a>
                         <a href={waNum ? `https://wa.me/${waNum}?text=${encodeURIComponent(msgConLinks)}` : undefined} target="_blank" rel="noreferrer"
-                          onClick={() => waNum && setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }))}
+                          onClick={() => { if (waNum) { setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); registrarSolicitudSeguimiento(p, "whatsapp"); } }}
                           style={{ ...btn(waNum ? C.green : C.muted, true), fontSize: 11, padding: "5px 10px", textDecoration: "none", opacity: waNum ? 1 : 0.5, pointerEvents: waNum ? "auto" : "none" }}>
                           💬 WhatsApp
                         </a>
