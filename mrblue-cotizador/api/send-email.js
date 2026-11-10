@@ -4,6 +4,11 @@
 // por eso sí puede llamar a Resend sin que el CORS lo bloquee. El navegador le
 // habla a esta función (mismo dominio, sin problema), y esta función es la que
 // de verdad le habla a Resend.
+//
+// attachments (opcional): [{ filename, path }] con la URL pública del archivo
+// (Resend lo descarga de ahí) o [{ filename, content }] con el archivo en base64.
+
+const MAX_ADJUNTOS = 10;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -16,9 +21,23 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Faltan campos: apiKey, from, to, subject, text" });
   }
 
-  // Adjuntos opcionales: [{ filename, path }] donde path es una URL pública
-  // (Supabase Storage). Resend descarga cada archivo y lo adjunta de verdad.
-  const conAdjuntos = Array.isArray(attachments) && attachments.length > 0;
+  let adjuntos = [];
+  if (attachments != null) {
+    if (!Array.isArray(attachments) || attachments.length > MAX_ADJUNTOS) {
+      return res.status(400).json({ error: `attachments debe ser una lista de máximo ${MAX_ADJUNTOS} archivos` });
+    }
+    for (const a of attachments) {
+      const filename = typeof a?.filename === "string" ? a.filename.slice(0, 200) : "";
+      if (!filename) return res.status(400).json({ error: "Cada adjunto necesita filename" });
+      if (typeof a.path === "string" && /^https:\/\//i.test(a.path)) {
+        adjuntos.push({ filename, path: a.path });
+      } else if (typeof a.content === "string" && a.content.length > 0) {
+        adjuntos.push({ filename, content: a.content });
+      } else {
+        return res.status(400).json({ error: `El adjunto ${filename} necesita path (https) o content (base64)` });
+      }
+    }
+  }
 
   try {
     const resendRes = await fetch("https://api.resend.com/emails", {
@@ -27,7 +46,7 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + apiKey,
       },
-      body: JSON.stringify({ from, to, subject, text, ...(conAdjuntos ? { attachments } : {}) }),
+      body: JSON.stringify({ from, to, subject, text, ...(adjuntos.length ? { attachments: adjuntos } : {}) }),
     });
 
     const data = await resendRes.json().catch(() => null);
