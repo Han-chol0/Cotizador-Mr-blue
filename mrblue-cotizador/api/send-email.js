@@ -10,11 +10,15 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { apiKey, from, to, subject, text } = req.body || {};
+  const { apiKey, from, to, subject, text, attachments } = req.body || {};
 
   if (!apiKey || !from || !to || !subject || !text) {
     return res.status(400).json({ error: "Faltan campos: apiKey, from, to, subject, text" });
   }
+
+  // Adjuntos opcionales: [{ filename, path }] donde path es una URL pública
+  // (Supabase Storage). Resend descarga cada archivo y lo adjunta de verdad.
+  const conAdjuntos = Array.isArray(attachments) && attachments.length > 0;
 
   try {
     const resendRes = await fetch("https://api.resend.com/emails", {
@@ -23,7 +27,7 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + apiKey,
       },
-      body: JSON.stringify({ from, to, subject, text }),
+      body: JSON.stringify({ from, to, subject, text, ...(conAdjuntos ? { attachments } : {}) }),
     });
 
     const data = await resendRes.json().catch(() => null);
