@@ -7640,6 +7640,65 @@ function SelectorUsuario({ onElegir }) {
   );
 }
 
+// ─── Selector de modo: ¿qué camino vas a trabajar? ───────────────────────────
+// Dos flujos separados: pedirle precios a los proveedores, o cotizar tú el
+// producto con los precios ya cargados. Cada uno muestra solo sus pestañas.
+const MODOS = [
+  {
+    key: "proveedores",
+    icono: "🤝",
+    titulo: "Solicitar cotización a proveedores",
+    desc: "Arma la solicitud, mándala por correo o WhatsApp y dale seguimiento hasta recibir precios.",
+    chip: "🤝 Proveedores",
+    color: "#E8734A",
+  },
+  {
+    key: "cotizar",
+    icono: "💵",
+    titulo: "Cotizar el producto tú mismo",
+    desc: "Calcula el costo con los precios que ya tienes cargados y saca el precio de venta con tu margen.",
+    chip: "💵 Cotizar",
+    color: "#0095D4",
+  },
+];
+const TABS_POR_MODO = {
+  proveedores: ["inbox", "cotizacion", "calc", "envio", "seg", "om", "ajustes"],
+  cotizar:     ["inbox", "cotizacion", "calc", "cotizar", "historial", "cronograma", "ajustes"],
+};
+
+function SelectorModo({ usuario, onElegir, onCambiarUsuario }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,58,95,0.96)", zIndex: 999,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: C.card, borderRadius: 12, padding: "28px 26px", maxWidth: 460, width: "100%" }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: C.text, marginBottom: 4 }}>
+          Hola {usuario} 👋 ¿Qué quieres hacer?
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 18 }}>
+          Puedes cambiar de camino en cualquier momento desde el botón del modo, arriba a la derecha.
+        </div>
+        {MODOS.map(m => (
+          <button key={m.key} onClick={() => onElegir(m.key)} style={{
+            display: "block", width: "100%", textAlign: "left", cursor: "pointer",
+            background: C.bg, border: `2px solid ${C.border}`, borderRadius: 10,
+            padding: "14px 16px", marginBottom: 10 }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = m.color; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14.5, color: C.text, marginBottom: 3 }}>
+              {m.icono} {m.titulo}
+            </div>
+            <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.45 }}>{m.desc}</div>
+          </button>
+        ))}
+        <button onClick={onCambiarUsuario} style={{ background: "none", border: "none", color: C.muted,
+          fontSize: 11.5, cursor: "pointer", padding: 0, textDecoration: "underline" }}>
+          No soy {usuario} — cambiar usuario
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // APP PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -7656,6 +7715,9 @@ export default function App() {
     });
   }, []);
   const [usuario, setUsuario] = useState(() => getUsuario());
+  // Modo de trabajo elegido al entrar: "proveedores" o "cotizar". Vive solo en
+  // memoria, así que al volver a entrar la app siempre pregunta qué quieres hacer.
+  const [modo, setModo] = useState(null);
   const [calcData, setCalcData]     = useState(null);
   const [tiempoEstimado, setTiempoEstimado] = useState(null); // {horas, maquinaNombre} o null
   const [proveedoresCotizacion, setProveedoresCotizacion] = useState([]); // [{id, nombre, email, whatsapp}]
@@ -7664,7 +7726,7 @@ export default function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  const tabs = [
+  const tabsTodos = [
     { key: "inbox",      label: "🗂 Cotizaciones"     },
     { key: "cotizacion", label: "📋 Solicitud"        },
     { key: "calc",       label: "📐 Pliegos"          },
@@ -7676,6 +7738,14 @@ export default function App() {
     { key: "om",         label: "📦 Órdenes de Maquila" },
     { key: "ajustes",    label: "⚙ Ajustes"           },
   ];
+  // Cada modo enseña solo las pestañas de su camino
+  const tabs = tabsTodos.filter(t => (TABS_POR_MODO[modo] || tabsTodos.map(x => x.key)).includes(t.key));
+
+  const elegirModo = (m) => {
+    setModo(m);
+    // Si la pestaña activa no existe en el modo nuevo, regresa al inicio del camino
+    if (!TABS_POR_MODO[m].includes(tab)) setTab("inbox");
+  };
 
   const handleGuardarCot = (cot) => {
     setCotizacion(cot);
@@ -7706,6 +7776,11 @@ export default function App() {
   }, [calcData, cotizacion?._supabase_id]);
 
   if (!usuario) return <SelectorUsuario onElegir={elegirUsuario} />;
+  if (!modo) return (
+    <SelectorModo usuario={usuario} onElegir={elegirModo}
+      onCambiarUsuario={() => { setUsuarioLS(""); setUsuario(""); }} />
+  );
+  const modoInfo = MODOS.find(m => m.key === modo);
 
   return (
     <div style={{ fontFamily: "Inter, sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
@@ -7734,6 +7809,12 @@ export default function App() {
               </span>
             </>
           )}
+          <button onClick={() => setModo(null)}
+            title="Cambiar de modo (no pierdes tu trabajo)"
+            style={{ background: modoInfo?.color || "rgba(255,255,255,0.12)", border: "none", color: "#fff",
+              borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+            {modoInfo?.chip || "Modo"} ↺
+          </button>
           <button onClick={() => { setUsuarioLS(""); setUsuario(""); }}
             title="Cambiar de usuario"
             style={{ background: "rgba(255,255,255,0.12)", border: "none", color: "#fff",
@@ -7783,9 +7864,15 @@ export default function App() {
             <Calculadora onCalcDone={setCalcData} cotizacion={cotizacion} />
             {calcData && (
               <div style={{ marginTop: 4 }}>
-                <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), width: "100%" }}>
-                  Continuar → ✉ Enviar solicitud
-                </button>
+                {modo === "cotizar" ? (
+                  <button onClick={() => setTab("cotizar")} style={{ ...btn(C.cyan, true), width: "100%" }}>
+                    Continuar → 💵 Cotizar
+                  </button>
+                ) : (
+                  <button onClick={() => setTab("envio")} style={{ ...btn(C.coral, true), width: "100%" }}>
+                    Continuar → ✉ Enviar solicitud
+                  </button>
+                )}
               </div>
             )}
           </>
@@ -7796,8 +7883,8 @@ export default function App() {
           <>
             <EnvioSolicitud calcData={calcData} cotizacion={cotizacion} tiempoEstimado={tiempoEstimado} proveedoresCotizacion={proveedoresCotizacion} />
             <div style={{ marginTop: 4 }}>
-              <button onClick={() => setTab("cotizar")} style={{ ...btn(C.cyan, true), width: "100%" }}>
-                Continuar → 💵 Cotizar
+              <button onClick={() => setTab("seg")} style={{ ...btn(C.coral, true), width: "100%" }}>
+                Continuar → 📋 Seguimiento
               </button>
             </div>
           </>
