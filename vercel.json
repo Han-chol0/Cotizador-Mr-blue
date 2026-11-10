@@ -2,6 +2,17 @@
   "functions": {
     "api/generar-costeo.js": {
       "includeFiles": "node_modules/pdfkit/js/**"
+    },
+    "api/generar-comparativo.js": {
+      "includeFiles": "node_modules/pdfkit/js/**"
+    },
+    "api/ordenes-maquila.js": {
+      "includeFiles": "node_modules/pdfkit/js/**",
+      "maxDuration": 60
+    },
+    "api/clickup-webhook.js": {
+      "includeFiles": "node_modules/pdfkit/js/**",
+      "maxDuration": 60
     }
   }
 }

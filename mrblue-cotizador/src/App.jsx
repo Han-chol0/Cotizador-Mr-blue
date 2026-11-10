@@ -1755,6 +1755,31 @@ async function deleteArchivoProveedor(archivoId, url) {
   if (error) console.error(error);
 }
 
+// ── Adjuntos de la solicitud (Plano Mecánico) ────────────────────────────────
+// Se suben al mismo bucket público, en planos/<cotización>/. El correo los manda
+// como archivo adjunto (Resend los descarga de la URL) y WhatsApp los lleva como link.
+const MAX_ADJUNTO_MB = 15;
+const claveAdjuntos = (cotizacion) => "mrblue_adjuntos_" + (cotizacion?.cot_id || cotizacion?.folio || "sin-folio");
+
+async function uploadAdjuntoSolicitud(cotKey, file) {
+  const limpio = (file.name || "archivo.pdf").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w.\-]+/g, "_");
+  const carpeta = String(cotKey || "sin-folio").replace(/[^\w\-]+/g, "_");
+  const path = `planos/${carpeta}/${Date.now()}_${limpio}`;
+  const { error } = await supabase.storage.from(BUCKET_ARCHIVOS).upload(path, file, { contentType: file.type || "application/pdf" });
+  if (error) throw new Error(error.message || "No se pudo subir el archivo");
+  const { data: pub } = supabase.storage.from(BUCKET_ARCHIVOS).getPublicUrl(path);
+  return { nombre: file.name, url: pub.publicUrl, path, bytes: file.size };
+}
+
+async function deleteAdjuntoSolicitud(adj) {
+  try { if (adj?.path) await supabase.storage.from(BUCKET_ARCHIVOS).remove([adj.path]); } catch (e) { console.error(e); }
+}
+
+// Texto que se agrega al final del mensaje cuando hay adjuntos (para WhatsApp y "Abrir correo").
+const textoLinksAdjuntos = (adjuntos) => (adjuntos && adjuntos.length)
+  ? "\n\n📎 " + (adjuntos.length > 1 ? "Archivos para cotizar" : "Plano mecánico") + ":\n" + adjuntos.map(a => a.url).join("\n")
+  : "";
+
 // Parser CSV simple: espera columnas "nombre,precio" (con encabezado o sin él).
 // No requiere librerías externas — suficiente para listas simples exportadas de Excel.
 // Parser CSV: acepta el formato corto "nombre,precio" y el extendido
@@ -3342,6 +3367,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
   const [generandoCosteo, setGenerandoCosteo] = useState(false);
   const [costeoListo, setCosteoListo] = useState(false);
   const [resultadoCosteo, setResultadoCosteo] = useState(null);
+  const [generandoComparativo, setGenerandoComparativo] = useState(false);
+  const [resultadoComparativo, setResultadoComparativo] = useState(null);
   useEffect(() => {
     const cotId = cotizacion?.cot_id || trabajoIdRef.current;
     historialPreciosDe(cotId).then(setHistorialFolio);
@@ -3645,6 +3672,124 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
       setResultadoCosteo({ error: e.message });
     } finally {
       setGenerandoCosteo(false);
+    }
+  };
+
+  // ── Comparativo de proveedores ──────────────────────────────────────────────
+  // Por cada proceso elegido, TODOS los proveedores con precio para ese servicio
+  // (mismo cálculo que el resto de Cotizar), del más barato al más caro.
+  const TIPO_POR_CATEGORIA = { impresion: "Impresores", papel: "Papel", barniz: "Barniz", laminado: "Laminado",
+    suaje: "Suaje", tintas_especiales: "Tintas Especiales", serigrafia: "Serigrafía", hotstamping: "Hotstamping",
+    hotmelt: "Hotmelt", cajas: "Cajas", maquila_sobre: "Maquila de sobre", acabado: "Acabados Manuales" };
+  const CLAVE_POR_CATEGORIA = { laminado: "laminado", suaje: "suaje", serigrafia: "serigrafia", maquila_sobre: "sobre",
+    barniz: "barniz", tintas_especiales: "tintas", impresion: "impresion", papel: "papel" };
+
+  const filasComparativo = (servicioId, cantidad, elegidoId, colores, area) =>
+    proveedores.flatMap(p => opcionesPrecio(p, servicioId).map(op => {
+      const id = combinarProvMaquina(p.id, op.maquinaId);
+      const r = costoYEscalonDe(id, servicioId, cantidad, colores, area);
+      if (!r || !(r.costo > 0)) return null;
+      const maq = op.maquinaId ? p.maquinas?.find(m => m.id === op.maquinaId) : null;
+      return {
+        proveedorId: p.id,
+        nombre: p.nombre + (maq ? " · " + (maq.nombre || "máquina") : ""),
+        precio: r.costo,
+        unitario: qty > 0 ? r.costo / qty : null,
+        tiempo: parseFloat(r.escalon?.tiempo_horas) > 0 ? parseFloat(r.escalon.tiempo_horas) : null,
+        calificacion: p.calificacion || 0,
+        notas: r.escalon?.notas || "",
+        elegido: !!elegidoId && id === elegidoId,
+      };
+    })).filter(Boolean).sort((a, b) => a.precio - b.precio);
+
+  const seccionComparativo = ({ proceso, clave, servicioId, cantidad, cantidadTexto, elegidoId, colores, area, label }) => {
+    const filas = filasComparativo(servicioId, cantidad, elegidoId, colores, area);
+    const tipo = TIPO_POR_CATEGORIA[servicioPorId(servicioId)?.categoria];
+    const conPrecio = new Set(filas.map(f => f.proveedorId));
+    const sinPrecio = tipo ? proveedores.filter(p => p.tipo === tipo && !conPrecio.has(p.id)).map(p => p.nombre) : [];
+    return {
+      proceso, clave, servicio: nombreServicio(servicioId), cantidadTexto,
+      filas: filas.map(({ proveedorId, ...f }) => f), sinPrecio,
+      real: label ? (parseFloat(realesPorLinea[label]) || null) : null,
+    };
+  };
+
+  const armarSeccionesComparativo = () => {
+    const pl = pliegos ? pliegos.toLocaleString("es-MX") + " pliegos" : "";
+    const out = [];
+    if (papelServicioId) out.push(seccionComparativo({ proceso: "Papel", clave: "papel", servicioId: papelServicioId, cantidad: pliegos, cantidadTexto: pl, elegidoId: papelProvId, label: "Papel · " + nombreServicio(papelServicioId) }));
+    if (sustratoServicioId) out.push(seccionComparativo({ proceso: "Sustrato", clave: "sustrato", servicioId: sustratoServicioId, cantidad: pliegos, cantidadTexto: pl, elegidoId: sustratoProvId, label: "Sustrato · " + nombreServicio(sustratoServicioId) }));
+    if (impServicioId) out.push(seccionComparativo({ proceso: "Impresión", clave: "impresion", servicioId: impServicioId, cantidad: pliegos, cantidadTexto: pl + (coloresManual ? " · " + coloresManual + " colores" : ""), elegidoId: impProvId, colores: coloresManual != null ? coloresManual : undefined, label: "Impresión · " + nombreServicio(impServicioId) }));
+    if (colorExtraServicioId) out.push(seccionComparativo({ proceso: "Tintas especiales", clave: "tintas", servicioId: colorExtraServicioId, cantidad: pliegos, cantidadTexto: pl + " · " + cantidadPantones + " pantone(s)", elegidoId: colorExtraProvId, colores: cantidadPantones }));
+    if (barnizServicioId) out.push(seccionComparativo({ proceso: "Barniz", clave: "barniz", servicioId: barnizServicioId, cantidad: pliegos, cantidadTexto: pl, elegidoId: barnizProvId }));
+    acabados.filter(a => a.servicioId).forEach(a => {
+      const unidades = a.base === "pliegos" ? pliegos : qty;
+      const cat = servicioPorId(a.servicioId)?.categoria;
+      out.push(seccionComparativo({
+        proceso: a.nombre || nombreServicio(a.servicioId), clave: CLAVE_POR_CATEGORIA[cat] || "acabado",
+        servicioId: a.servicioId, cantidad: unidades,
+        cantidadTexto: (unidades || 0).toLocaleString("es-MX") + (a.base === "pliegos" ? " pliegos" : " piezas"),
+        elegidoId: a.provId, area: areaM2Para(a.base),
+      }));
+    });
+    Object.entries(costosFijosSel).forEach(([sid, pid]) => {
+      out.push(seccionComparativo({ proceso: nombreServicio(sid), clave: "fijo", servicioId: sid, cantidad: 0, cantidadTexto: "costo fijo", elegidoId: pid }));
+    });
+    return out;
+  };
+
+  const generarComparativo = async () => {
+    setGenerandoComparativo(true);
+    setResultadoComparativo(null);
+    try {
+      const secciones = armarSeccionesComparativo();
+      if (!secciones.length) throw new Error("Elige al menos un servicio (papel, impresión, acabados…) para comparar.");
+      const payload = {
+        task_id: cotizacion?.task_id || null,
+        folio: cotizacion?.folio || "",
+        proyecto: cotizacion?.nombre_proyecto || "",
+        cantidad: qty ? qty.toLocaleString("es-MX") + " piezas" : "",
+        pliegos: pliegos ? pliegos.toLocaleString("es-MX") + (sel?.label ? " · " + sel.label : "") : "",
+        medida: calcData ? `${calcData.pw}×${calcData.ph} cm` + (calcData.extW ? ` (ext. ${calcData.extW}×${calcData.extH})` : "") : (cotizacion?.tamano_final || ""),
+        material: calcData?.papelNombre || cotizacion?.papel_acabado_gramaje || "",
+        tintas: (tintasFrente || tintasVuelta) ? `${tintasFrente || 0}×${tintasVuelta || 0}` : "",
+        elaborado: getUsuario() || "",
+        fecha: new Date().toLocaleDateString("es-MX", { day: "2-digit", month: "short", year: "numeric" }),
+        secciones,
+      };
+      const r = await fetch("/api/generar-comparativo", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data.error) throw new Error(data.error || `El servidor respondió ${r.status}`);
+
+      if (data.pdfBase64) {
+        const bin = atob(data.pdfBase64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = data.nombreArchivo || "comparativo.pdf";
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      }
+
+      const cu = data.clickup || {};
+      const lineas = [];
+      if (!cu.intentado) lineas.push("✓ PDF descargado. Esta cotización no tiene tarea de ClickUp ligada.");
+      else if (cu.ok) lineas.push("✓ PDF descargado y adjuntado a la tarea de ClickUp.");
+      else lineas.push(`✓ PDF descargado, pero no se pudo adjuntar a la tarea: ${cu.error}`);
+      (cu.subtareas || []).forEach(st => lineas.push(st.ok
+        ? `✓ ${st.proceso} → subtarea "${st.subtarea}"`
+        : `⚠ ${st.proceso} → "${st.subtarea}": ${st.error}`));
+      if (cu.intentado && (cu.sinSubtarea || []).length) {
+        lineas.push(`Sin subtarea todavía: ${cu.sinSubtarea.join(", ")}. Cuando se creen las subtareas, vuelve a generarlo.`);
+      }
+      setResultadoComparativo({ lineas });
+    } catch (e) {
+      setResultadoComparativo({ error: e.message });
+    } finally {
+      setGenerandoComparativo(false);
     }
   };
 
@@ -4395,6 +4540,23 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           border: `1.5px solid ${resultadoCosteo.error ? C.red : C.green}`, borderRadius: 8,
           padding: "9px 12px", fontSize: 11.5, color: resultadoCosteo.error ? C.red : C.navy, marginTop: 8 }}>
           {resultadoCosteo.error ? "⚠ " + resultadoCosteo.error : resultadoCosteo.mensaje}
+        </div>
+      )}
+
+      <button onClick={generarComparativo} disabled={generandoComparativo}
+        style={{ ...btn(C.navy, true), marginTop: 8, width: "100%", opacity: generandoComparativo ? 0.6 : 1 }}>
+        {generandoComparativo ? "Generando…" : "📊 Generar comparativo de proveedores"}
+      </button>
+      <div style={{ fontSize: 10.5, color: C.muted, marginTop: 4 }}>
+        PDF con todos los proveedores de cada proceso, del más barato al más caro, con el elegido marcado
+        {cotizacion?.task_id ? ". Se adjunta a la tarea de ClickUp y cada proceso a su subtarea (ej. Impresión)." : ". Esta cotización no tiene tarea de ClickUp, así que solo se descarga."}
+      </div>
+      {resultadoComparativo && (
+        <div style={{ background: resultadoComparativo.error ? "#FEF2F2" : "#EAF7EE",
+          border: `1.5px solid ${resultadoComparativo.error ? C.red : C.green}`, borderRadius: 8,
+          padding: "9px 12px", fontSize: 11.5, color: resultadoComparativo.error ? C.red : C.navy, marginTop: 8 }}>
+          {resultadoComparativo.error ? "⚠ " + resultadoComparativo.error
+            : resultadoComparativo.lineas.map((l, i) => <div key={i}>{l}</div>)}
         </div>
       )}
 
@@ -5510,6 +5672,216 @@ function AdminTemplates() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Ajustes — configuración general de la herramienta (por ahora, el envío de correo)
 // ═══════════════════════════════════════════════════════════════════════════════
+// ── 📦 Órdenes de Maquila ─────────────────────────────────────────────────────
+// Se crean solas al marcar "Generar Documentacion" en el pedido de ClickUp
+// (o aquí con el link de la tarea). Una por proveedor, todas con la misma O.M.
+// Aquí se revisan, se corrigen (pliegos, merma, esquema de envío…) y se mandan
+// al proveedor con la orden y el Plano Mecánico adjuntos.
+const CAMPOS_OM = [
+  ["pliegosProduccion", "Pliegos de producción", "number"],
+  ["pliegosMerma", "Pliegos merma", "number"],
+  ["pliegosTotales", "Pliegos totales", "number"],
+  ["costo", "Costo cotizado (sin IVA)", "number"],
+  ["proceso", "Proceso a realizar", "text"],
+  ["papel", "Papel", "text"],
+  ["esquema", "Esquema de envío (a quién entrega)", "textarea"],
+  ["observaciones", "Observaciones", "textarea"],
+];
+
+function OrdenesMaquila() {
+  const [ordenes, setOrdenes] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [errorCarga, setErrorCarga] = useState("");
+  const [linkTarea, setLinkTarea] = useState("");
+  const [generando, setGenerando] = useState(false);
+  const [aviso, setAviso] = useState(null);
+  const [abierta, setAbierta] = useState(null);
+  const [borrador, setBorrador] = useState({});
+  const [trabajando, setTrabajando] = useState(null);
+  const [verEnviadas, setVerEnviadas] = useState(false);
+  const resendKey = localStorage.getItem("mrblue_resend_key") || "";
+  const fromEmail = localStorage.getItem("mrblue_from_email") || "";
+
+  const cargar = async () => {
+    setCargando(true);
+    const { data, error } = await supabase.from("ordenes_maquila").select("*").order("updated_at", { ascending: false }).limit(200);
+    if (error) setErrorCarga(error.message.includes("does not exist")
+      ? "Falta crear la tabla ordenes_maquila en Supabase (archivo supabase/ordenes_maquila.sql)."
+      : error.message);
+    else { setErrorCarga(""); setOrdenes(data || []); }
+    setCargando(false);
+  };
+  useEffect(() => { cargar(); }, []);
+
+  const api = async (body) => {
+    const r = await fetch("/api/ordenes-maquila", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.error) throw new Error(data.error || `El servidor respondió ${r.status}`);
+    return data;
+  };
+
+  const generar = async () => {
+    setGenerando(true); setAviso(null);
+    try {
+      const r = await api({ accion: "generar", task_id: linkTarea });
+      const lineas = [`O.M. ${r.om || "—"}: ${r.ordenes.filter(o => o.id).length} orden(es) generada(s) y anexada(s) en ClickUp.`];
+      r.ordenes.filter(o => o.omitida).forEach(o => lineas.push(`${o.maquilador}: no se tocó (${o.omitida}).`));
+      if (r.sinMaquilador?.length) lineas.push(`Subtareas sin MAQUILADOR: ${r.sinMaquilador.join(", ")}.`);
+      if (!r.plano) lineas.push("No encontré Plano Mecánico (PDF que empiece con PM_) en la tarea; se mandará solo la orden.");
+      setAviso({ ok: true, lineas });
+      setLinkTarea("");
+      cargar();
+    } catch (e) { setAviso({ ok: false, lineas: [e.message] }); }
+    setGenerando(false);
+  };
+
+  const abrir = (o) => {
+    setAbierta(abierta === o.id ? null : o.id);
+    setBorrador({ email: o.email || "", contacto: o.contacto || "", telefono: o.telefono || "", ...Object.fromEntries(CAMPOS_OM.map(([k]) => [k, o.datos?.[k] ?? ""])) });
+  };
+
+  const guardar = async (o) => {
+    setTrabajando(o.id); setAviso(null);
+    try {
+      const datos = Object.fromEntries(CAMPOS_OM.map(([k]) => [k, borrador[k]]));
+      if (datos.pliegosProduccion !== "" && datos.pliegosMerma !== "" && !borrador.pliegosTotalesEditado) {
+        datos.pliegosTotales = (Number(datos.pliegosProduccion) || 0) + (Number(datos.pliegosMerma) || 0);
+      }
+      await api({ accion: "regenerar", id: o.id, datos, email: borrador.email, contacto: borrador.contacto, telefono: borrador.telefono });
+      setAviso({ ok: true, lineas: [`✓ ${o.maquilador}: PDF corregido y anexado otra vez en ClickUp.`] });
+      await cargar();
+    } catch (e) { setAviso({ ok: false, lineas: [e.message] }); }
+    setTrabajando(null);
+  };
+
+  const enviar = async (o) => {
+    if (!resendKey || !fromEmail) { setAviso({ ok: false, lineas: ["Configura tu correo de envío en ✉ Enviar solicitud → ajustes de correo (Resend)."] }); return; }
+    const para = (abierta === o.id ? borrador.email : o.email) || "";
+    if (!/\S+@\S+\.\S+/.test(para)) { setAviso({ ok: false, lineas: [`${o.maquilador} no tiene correo. Agrégalo y guarda antes de enviar.`] }); return; }
+    setTrabajando(o.id); setAviso(null);
+    try {
+      const d = o.datos || {};
+      const entrega = d.fechaEntrega ? new Date(Number(d.fechaEntrega)).toLocaleDateString("es-MX", { day: "2-digit", month: "long", year: "numeric" }) : "la fecha acordada";
+      const saludo = o.contacto ? `Buen día ${o.contacto},` : "Buen día,";
+      const texto = `${saludo}\n\nLe confirmamos la Orden de Maquila O.M. ${o.om} – ${d.proyecto || o.task_nombre || ""}.\n\n` +
+        `Proceso: ${d.proceso || "—"}\nCantidad: ${Number(d.cantidad || d.piezas || 0).toLocaleString("es-MX")} piezas\n` +
+        (d.pliegosTotales ? `Pliegos totales: ${Number(d.pliegosTotales).toLocaleString("es-MX")}\n` : "") +
+        `Fecha de entrega: ${entrega}\nEntrega: ${d.esquema || "por confirmar"}\n\n` +
+        `Adjuntamos la Orden de Maquila${o.plano_url ? " y el Plano Mecánico" : ""}. Por favor confirme de recibido y firme la orden.\n\nGracias,\nMr. Blue Laboratorios Creativos`;
+      const attachments = [{ filename: `Orden_de_Maquila_OM_${o.om}_${o.maquilador}.pdf`.replace(/[^\w.\-]+/g, "_"), path: o.pdf_url }];
+      if (o.plano_url) attachments.push({ filename: o.plano_nombre || "Plano_Mecanico.pdf", path: o.plano_url });
+      const r = await fetch("/api/send-email", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: para, subject: `Orden de Maquila O.M. ${o.om} – ${d.proyecto || ""} | Mr. Blue`, text: texto, attachments }) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `Resend respondió ${r.status}`);
+      await api({ accion: "enviada", id: o.id, email: para });
+      setAviso({ ok: true, lineas: [`✓ Orden enviada a ${o.maquilador} (${para}) y registrada en ClickUp.`] });
+      setAbierta(null);
+      await cargar();
+    } catch (e) { setAviso({ ok: false, lineas: [e.message] }); }
+    setTrabajando(null);
+  };
+
+  const visibles = ordenes.filter(o => verEnviadas || o.estado !== "enviada");
+  const porPedido = visibles.reduce((acc, o) => { (acc[o.task_id] = acc[o.task_id] || []).push(o); return acc; }, {});
+
+  return (
+    <div>
+      <div style={{ ...cardStyle, marginBottom: 14 }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: C.navy, marginBottom: 4 }}>📦 Órdenes de Maquila</div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
+          Se generan solas al marcar <b>Generar Documentacion</b> en el pedido de ClickUp: una por proveedor, con la misma O.M. También puedes generarlas aquí.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input value={linkTarea} onChange={e => setLinkTarea(e.target.value)} placeholder="Link o ID de la tarea del pedido en ClickUp"
+            style={{ ...inputStyle, flex: "1 1 260px", fontSize: 13 }} />
+          <button onClick={generar} disabled={generando || !linkTarea.trim()}
+            style={{ ...btn(C.navy, true), opacity: generando || !linkTarea.trim() ? 0.6 : 1 }}>
+            {generando ? "Generando…" : "Generar órdenes"}
+          </button>
+        </div>
+        {aviso && (
+          <div style={{ background: aviso.ok ? "#EAF7EE" : "#FEF2F2", border: `1.5px solid ${aviso.ok ? C.green : C.red}`, borderRadius: 8,
+            padding: "9px 12px", fontSize: 12, color: aviso.ok ? C.navy : C.red, marginTop: 10 }}>
+            {aviso.lineas.map((l, i) => <div key={i}>{l}</div>)}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontSize: 12, color: C.muted }}>{visibles.length} orden(es) {verEnviadas ? "" : "pendientes"}</div>
+        <label style={{ fontSize: 12, color: C.muted, display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }}>
+          <input type="checkbox" checked={verEnviadas} onChange={e => setVerEnviadas(e.target.checked)} /> Ver también las enviadas
+        </label>
+      </div>
+
+      {cargando && <div style={{ fontSize: 13, color: C.muted }}>Cargando…</div>}
+      {errorCarga && <div style={{ fontSize: 13, color: C.red }}>⚠ {errorCarga}</div>}
+      {!cargando && !errorCarga && visibles.length === 0 && (
+        <div style={{ ...cardStyle, fontSize: 13, color: C.muted, textAlign: "center" }}>No hay órdenes pendientes. Marca Generar Documentacion en un pedido de ClickUp o pega aquí su link.</div>
+      )}
+
+      {Object.entries(porPedido).map(([taskId, lista]) => (
+        <div key={taskId} style={{ ...cardStyle, marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, color: C.navy, fontSize: 14 }}>O.M. {lista[0].om || "—"} · {lista[0].task_nombre}</div>
+            <a href={`https://app.clickup.com/t/${taskId}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: C.cyan }}>Abrir en ClickUp ↗</a>
+          </div>
+          {lista.map(o => {
+            const enviada = o.estado === "enviada";
+            const ocupada = trabajando === o.id;
+            return (
+              <div key={o.id} style={{ border: `1.5px solid ${enviada ? C.green : C.border}`, borderRadius: 8, padding: "10px 12px", marginBottom: 8, background: enviada ? "#F3FBF5" : C.bg }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13.5, color: C.text }}>{o.maquilador}
+                      <span style={{ fontWeight: 500, color: C.muted }}> · {o.datos?.proceso || ""}</span></div>
+                    <div style={{ fontSize: 11.5, color: o.email ? C.muted : C.coral }}>
+                      {o.email || "Sin correo"}{o.datos?.costo ? " · $" + Number(o.datos.costo).toLocaleString("es-MX", { minimumFractionDigits: 2 }) + " + IVA" : ""}
+                      {enviada ? ` · ✓ Enviada ${new Date(o.enviada_at).toLocaleDateString("es-MX")}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <a href={o.pdf_url} target="_blank" rel="noreferrer" style={{ ...btn(C.card), color: C.navy, border: `1.5px solid ${C.border}`, fontSize: 12, padding: "6px 10px", textDecoration: "none" }}>📄 Orden</a>
+                    {o.plano_url && <a href={o.plano_url} target="_blank" rel="noreferrer" style={{ ...btn(C.card), color: C.navy, border: `1.5px solid ${C.border}`, fontSize: 12, padding: "6px 10px", textDecoration: "none" }}>📐 Plano</a>}
+                    <button onClick={() => abrir(o)} style={{ ...btn(C.card), color: C.navy, border: `1.5px solid ${C.border}`, fontSize: 12, padding: "6px 10px" }}>{abierta === o.id ? "Cerrar" : "✏ Revisar"}</button>
+                    <button onClick={() => enviar(o)} disabled={ocupada}
+                      style={{ ...btn(enviada ? C.muted : C.green, true), fontSize: 12, padding: "6px 12px", opacity: ocupada ? 0.6 : 1 }}>
+                      {ocupada ? "…" : enviada ? "Reenviar" : "📧 Enviar"}
+                    </button>
+                  </div>
+                </div>
+                {abierta === o.id && (
+                  <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))", gap: 8 }}>
+                    {[["email", "Correo del proveedor"], ["contacto", "Contacto"], ["telefono", "Teléfono"]].map(([k, l]) => (
+                      <label key={k} style={{ fontSize: 11, color: C.muted }}>{l}
+                        <input value={borrador[k] ?? ""} onChange={e => setBorrador(b => ({ ...b, [k]: e.target.value }))} style={{ ...inputStyle, fontSize: 12.5, padding: "6px 8px", marginTop: 2 }} />
+                      </label>
+                    ))}
+                    {CAMPOS_OM.map(([k, l, tipo]) => (
+                      <label key={k} style={{ fontSize: 11, color: C.muted, gridColumn: tipo === "textarea" ? "1 / -1" : undefined }}>{l}
+                        {tipo === "textarea"
+                          ? <textarea value={borrador[k] ?? ""} onChange={e => setBorrador(b => ({ ...b, [k]: e.target.value }))} rows={2} style={{ ...inputStyle, fontSize: 12.5, padding: "6px 8px", marginTop: 2, resize: "vertical" }} />
+                          : <input type={tipo} value={borrador[k] ?? ""} onChange={e => setBorrador(b => ({ ...b, [k]: e.target.value, ...(k === "pliegosTotales" ? { pliegosTotalesEditado: true } : {}) }))} style={{ ...inputStyle, fontSize: 12.5, padding: "6px 8px", marginTop: 2 }} />}
+                      </label>
+                    ))}
+                    <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "center" }}>
+                      <button onClick={() => guardar(o)} disabled={ocupada} style={{ ...btn(C.navy, true), fontSize: 12.5, opacity: ocupada ? 0.6 : 1 }}>
+                        {ocupada ? "Guardando…" : "Guardar y rehacer PDF"}
+                      </button>
+                      <span style={{ fontSize: 11, color: C.muted }}>Pliegos de producción y merma: tómalos del Cotizador (📐 Pliegos) de esta cotización.</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Ajustes() {
   const [seccion, setSeccion] = useState("general");
   const [resendKey, setResendKey] = useState(() => localStorage.getItem("mrblue_resend_key") || "");
@@ -5734,6 +6106,39 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
   const [todosProveedores, setTodosProveedores] = useState([]);
   const [proveedoresElegidos, setProveedoresElegidos] = useState({}); // { [provId]: true } — a quién sí le vas a pedir cotización
   const [refrescarSeg, setRefrescarSeg] = useState(0); // fuerza recarga del seguimiento al enviar
+  // Plano Mecánico y otros archivos que se mandan a TODOS los proveedores de esta cotización.
+  const claveAdj = claveAdjuntos(cotizacion);
+  const [adjuntos, setAdjuntos] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(claveAdj) || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(claveAdj, JSON.stringify(adjuntos)); } catch {}
+  }, [adjuntos, claveAdj]);
+  const [subiendoAdjunto, setSubiendoAdjunto] = useState(false);
+  const [errorAdjunto, setErrorAdjunto] = useState("");
+  const adjuntosResend = adjuntos.map(a => ({ filename: a.nombre, path: a.url }));
+  const conLinks = (msg) => msg + textoLinksAdjuntos(adjuntos);
+
+  const agregarAdjuntos = async (files) => {
+    setErrorAdjunto("");
+    const lista = Array.from(files || []);
+    if (!lista.length) return;
+    setSubiendoAdjunto(true);
+    for (const f of lista) {
+      if (f.size > MAX_ADJUNTO_MB * 1024 * 1024) { setErrorAdjunto(`${f.name} pesa más de ${MAX_ADJUNTO_MB} MB.`); continue; }
+      try {
+        const adj = await uploadAdjuntoSolicitud(cotizacion?.cot_id || cotizacion?.folio, f);
+        setAdjuntos(prev => [...prev, adj]);
+      } catch (e) {
+        setErrorAdjunto(`No se pudo subir ${f.name}: ${e.message}`);
+      }
+    }
+    setSubiendoAdjunto(false);
+  };
+  const quitarAdjunto = async (adj) => {
+    setAdjuntos(prev => prev.filter(a => a.url !== adj.url));
+    await deleteAdjuntoSolicitud(adj);
+  };
 
   useEffect(() => {
     loadProveedoresDB().then(setTodosProveedores);
@@ -5835,7 +6240,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
       const r = await fetch("/api/send-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: p.email, subject: asunto, text: msg }),
+        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: p.email, subject: asunto, text: msg, attachments: adjuntosResend }),
       }).catch(err => ({ ok: false, _networkError: err.message }));
       if (r?.ok) {
         exitosos++;
@@ -5869,7 +6274,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     const p = colaWhatsApp[indiceWhatsApp];
     if (!p) return;
     const num = p.whatsapp.replace(/\D/g, "");
-    const msg = mensajeParaProveedor(p);
+    const msg = conLinks(mensajeParaProveedor(p));
     window.open(`https://wa.me/${num}?text=${encodeURIComponent(msg)}`, "_blank");
     setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }));
   };
@@ -5903,7 +6308,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
       const r = await fetch("/api/send-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: proveedorEmail, subject: "Solicitud de cotización – " + (producto || "Producto offset") + " | Mr. Blue", text: mensajeFinal }),
+        body: JSON.stringify({ apiKey: resendKey, from: fromEmail, to: proveedorEmail, subject: "Solicitud de cotización – " + (producto || "Producto offset") + " | Mr. Blue", text: mensajeFinal, attachments: adjuntosResend }),
       }).catch(() => null);
       entry.canales.push(r?.ok ? "✓ Correo enviado" : "✗ Error al enviar correo");
     } else if (proveedorEmail) {
@@ -5911,7 +6316,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
     }
     if (proveedorTel) {
       const num = proveedorTel.replace(/\D/g, "");
-      entry.waLink = "https://wa.me/" + (num.startsWith("52") ? num : "52" + num) + "?text=" + encodeURIComponent(mensajeFinal);
+      entry.waLink = "https://wa.me/" + (num.startsWith("52") ? num : "52" + num) + "?text=" + encodeURIComponent(conLinks(mensajeFinal));
       entry.canales.push("↗ Link WhatsApp listo");
     }
     const existing = await storageGet("solicitudes") || [];
@@ -5965,6 +6370,35 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
           )}
         </div>
 
+        {/* Plano Mecánico y archivos para TODOS los proveedores */}
+        <div style={{ background: adjuntos.length ? "#F0FFF4" : "#FFF9E8", border: `1.5px solid ${adjuntos.length ? C.green : C.amber}`, borderRadius: 8, padding: "12px", marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.navy }}>
+              📎 Plano Mecánico para los proveedores {adjuntos.length > 0 && <span style={{ color: C.green }}>· {adjuntos.length} archivo{adjuntos.length > 1 ? "s" : ""}</span>}
+            </div>
+            <label style={{ ...btn(C.navy, true), fontSize: 12, padding: "6px 14px", cursor: subiendoAdjunto ? "wait" : "pointer", opacity: subiendoAdjunto ? 0.6 : 1 }}>
+              {subiendoAdjunto ? "Subiendo…" : "＋ Agregar PDF"}
+              <input type="file" accept="application/pdf,image/*" multiple disabled={subiendoAdjunto}
+                onChange={e => { agregarAdjuntos(e.target.files); e.target.value = ""; }} style={{ display: "none" }} />
+            </label>
+          </div>
+          <div style={{ fontSize: 11.5, color: C.muted, marginBottom: adjuntos.length ? 8 : 0 }}>
+            {adjuntos.length
+              ? "Se manda adjunto en cada correo y como link en cada WhatsApp."
+              : "Sube el Plano Mecánico (PDF) antes de enviar. Manda el plano, nunca la prueba original del cliente."}
+          </div>
+          {adjuntos.map(a => (
+            <div key={a.url} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 10px", marginTop: 4 }}>
+              <a href={a.url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: C.navy, fontWeight: 600, wordBreak: "break-all" }}>📄 {a.nombre}</a>
+              <span style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                <span style={{ fontSize: 10.5, color: C.muted }}>{a.bytes ? (a.bytes / 1024 / 1024).toFixed(1) + " MB" : ""}</span>
+                <button onClick={() => quitarAdjunto(a)} title="Quitar" style={{ background: "none", border: "none", color: C.coral, fontWeight: 700, cursor: "pointer", fontSize: 13 }}>✕</button>
+              </span>
+            </div>
+          ))}
+          {errorAdjunto && <div style={{ fontSize: 11.5, color: C.coral, marginTop: 6 }}>{errorAdjunto}</div>}
+        </div>
+
         {/* Producto y template */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
           {todosProveedores.length > 0 && (() => {
@@ -6016,7 +6450,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button onClick={enviarCorreoATodos} disabled={enviandoTodos || proveedoresParaEnviar.filter(p => p.email).length === 0}
                     style={{ ...btn(C.coral, true), fontSize: 12, padding: "6px 14px", opacity: enviandoTodos ? 0.6 : 1 }}>
-                    {enviandoTodos ? "Enviando…" : `📧 Correo a todos (${proveedoresParaEnviar.filter(p => p.email).length})`}
+                    {enviandoTodos ? "Enviando…" : `📧 Correo a todos (${proveedoresParaEnviar.filter(p => p.email).length})${adjuntos.length ? " con 📎 " + adjuntos.length : ""}`}
                   </button>
                   <button onClick={() => iniciarColaWhatsApp(false)} disabled={indiceWhatsApp >= 0 || conWa.length === 0}
                     style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px", opacity: indiceWhatsApp >= 0 ? 0.6 : 1 }}>
@@ -6056,7 +6490,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                     {colaWhatsApp[indiceWhatsApp].contactoNombre ? " · " + colaWhatsApp[indiceWhatsApp].contactoNombre : ""}
                   </div>
                   <div style={{ whiteSpace: "pre-wrap", fontSize: 11.5, color: C.text, background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginBottom: 8, maxHeight: 140, overflowY: "auto" }}>
-                    {mensajeParaProveedor(colaWhatsApp[indiceWhatsApp])}
+                    {conLinks(mensajeParaProveedor(colaWhatsApp[indiceWhatsApp]))}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={abrirWhatsAppActual} style={{ ...btn(C.green, true), fontSize: 12, padding: "6px 14px", flex: 1 }}>
@@ -6078,6 +6512,7 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                 {proveedoresParaEnviar.map(p => {
                   const servicioActual = tipoServicioPorProveedor[p.id] || TIPO_PROVEEDOR_A_SERVICIO[p.tipo] || "Otro";
                   const msg = mensajeParaProveedor(p);
+                  const msgConLinks = conLinks(msg);
                   const enviado = !!marcadosEnviados[p.id];
                   const asunto = "Solicitud de cotización — " + (producto || cotizacion?.nombre_proyecto || "proyecto");
                   const waNum = (p.whatsapp || "").replace(/\D/g, "");
@@ -6116,14 +6551,14 @@ function EnvioSolicitud({ calcData, cotizacion, tiempoEstimado, proveedoresCotiz
                       </details>
 
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button onClick={() => { navigator.clipboard.writeText(msg); setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); }}
+                        <button onClick={() => { navigator.clipboard.writeText(msgConLinks); setMarcadosEnviados(prev => ({ ...prev, [p.id]: true })); }}
                           style={{ ...btn(C.navy, true), fontSize: 11, padding: "5px 10px" }}>📋 Copiar mensaje</button>
-                        <a href={p.email ? `mailto:${p.email}?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(msg)}` : undefined}
+                        <a href={p.email ? `mailto:${p.email}?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(msgConLinks)}` : undefined}
                           onClick={() => p.email && setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }))}
                           style={{ ...btn(p.email ? C.coral : C.muted, true), fontSize: 11, padding: "5px 10px", textDecoration: "none", opacity: p.email ? 1 : 0.5, pointerEvents: p.email ? "auto" : "none" }}>
                           ✉ Abrir correo
                         </a>
-                        <a href={waNum ? `https://wa.me/${waNum}?text=${encodeURIComponent(msg)}` : undefined} target="_blank" rel="noreferrer"
+                        <a href={waNum ? `https://wa.me/${waNum}?text=${encodeURIComponent(msgConLinks)}` : undefined} target="_blank" rel="noreferrer"
                           onClick={() => waNum && setMarcadosEnviados(prev => ({ ...prev, [p.id]: true }))}
                           style={{ ...btn(waNum ? C.green : C.muted, true), fontSize: 11, padding: "5px 10px", textDecoration: "none", opacity: waNum ? 1 : 0.5, pointerEvents: waNum ? "auto" : "none" }}>
                           💬 WhatsApp
@@ -7238,6 +7673,7 @@ export default function App() {
     { key: "seg",        label: "📋 Seguimiento"       },
     { key: "historial",  label: "📈 Historial precios" },
     { key: "cronograma", label: "📅 Cronograma"        },
+    { key: "om",         label: "📦 Órdenes de Maquila" },
     { key: "ajustes",    label: "⚙ Ajustes"           },
   ];
 
@@ -7369,6 +7805,7 @@ export default function App() {
         {tab === "seg"       && <Seguimiento />}
         {tab === "historial" && <HistorialPreciosCotizaciones cotIdFiltro={historialFiltro} onLimpiarFiltro={() => setHistorialFiltro(null)} />}
         {tab === "cronograma" && <CronogramaGeneral />}
+        {tab === "om" && <OrdenesMaquila />}
         {tab === "ajustes" && <Ajustes />}
       </div>
     </div>
