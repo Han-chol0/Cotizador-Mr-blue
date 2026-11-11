@@ -351,6 +351,27 @@ function calcImposition(sheetW, sheetH, pieceW, pieceH, margin = 0.5, pinza = 0)
   };
 }
 
+// ─── ¿Este impresor puede correr un pliego de w×h? ───────────────────────────
+// Primero por los límites de sus máquinas (capturados al darlo de alta en
+// Proveedores); si no capturó límites, por sus pliegos de rutina; y si no hay
+// ningún dato, no se bloquea nada. Se prueban las dos orientaciones.
+function impresorAceptaPliego(imp, w, h) {
+  if (!imp) return true;
+  const maqs = (imp.maquinas || []).filter(m => parseFloat(m.maxW) > 0 && parseFloat(m.maxH) > 0);
+  if (maqs.length) {
+    return maqs.some(m => {
+      const minW = parseFloat(m.minW) || 0, minH = parseFloat(m.minH) || 0;
+      const maxW = parseFloat(m.maxW), maxH = parseFloat(m.maxH);
+      const normal = w >= minW && w <= maxW && h >= minH && h <= maxH;
+      const girado = h >= minW && h <= maxW && w >= minH && w <= maxH;
+      return normal || girado;
+    });
+  }
+  const rutina = imp.pliegosManeja || [];
+  if (rutina.length) return rutina.some(p => (p.w === w && p.h === h) || (p.w === h && p.h === w));
+  return true;
+}
+
 // ─── Filtra pliegos según máquina ────────────────────────────────────────────
 function filterSheetsByMachine(machine, extraSheets = []) {
   // A los 6 estándar se les suman las medidas que algún papelero de verdad vende
@@ -2733,6 +2754,8 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [papelNombre, setPapelNombre] = useState(() => cotizacion?.papel_acabado_gramaje ? cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() : "");
   // Impresores con sus pliegos de rutina, para marcar en cada tarjeta quién lo maneja.
   const [impresores, setImpresores] = useState([]);
+  // Impresor elegido para ESTE trabajo: limita las medidas a lo que sus máquinas aceptan.
+  const [impresorSel, setImpresorSel] = useState("");
   // Catálogo de papeles + todos los proveedores, para comparar el costo real de cada medida.
   const [catalogoPapel, setCatalogoPapel] = useState([]);
   const [todosProvs, setTodosProvs] = useState([]);
@@ -2941,7 +2964,9 @@ function Calculadora({ onCalcDone, cotizacion }) {
     // Suma las medidas que algún papelero de verdad vende para este papel,
     // para poder compararlas contra los formatos estándar.
     const medidasProveedor = opcionesPapel.map(o => ({ label: `${o.w}×${o.h} cm`, w: o.w, h: o.h }));
-    const sheetsWithCompat = filterSheetsByMachine(null, medidasProveedor);
+    const impElegido = todosProvs.find(p => p.id === impresorSel) || null;
+    const sheetsWithCompat = filterSheetsByMachine(null, medidasProveedor)
+      .map(s => ({ ...s, compatible: impresorAceptaPliego(impElegido, s.w, s.h) }));
 
     const raw = sheetsWithCompat.map(({ label, w, h, compatible }) => ({
       sheet: { label, w, h }, compatible,
@@ -2989,6 +3014,12 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const bestMerma = bestTotal != null && bestNeto != null ? bestTotal - bestNeto : null;
 
   const incompatiblesCount = results?.raw.filter(r => !r.compatible).length ?? 0;
+
+  // Si cambias de impresor con resultados en pantalla, se recalcula solo.
+  useEffect(() => {
+    if (results) calcular();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [impresorSel]);
 
   // Cuál medida sale más barata en papel — ojo: NO siempre es la que más piezas rinde,
   // porque un pliego más grande puede costar más de lo que ahorra en rendimiento.
@@ -3110,6 +3141,18 @@ function Calculadora({ onCalcDone, cotizacion }) {
             </div>
             <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
               Pinza (un borde) · refile por lado. Se descuentan antes de acomodar poses.
+            </div>
+          </div>
+          <div>
+            <label style={labelStyle}>🖨 ¿Quién lo imprime?</label>
+            <select value={impresorSel} onChange={e => setImpresorSel(e.target.value)} style={inputStyle}>
+              <option value="">Todos los impresores</option>
+              {todosProvs.filter(p => p.tipo === "Impresores").map(p => (
+                <option key={p.id} value={p.id}>{p.nombre}</option>
+              ))}
+            </select>
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
+              Solo se aceptan pliegos que caben en sus máquinas (lo capturado en 🏭 Proveedores); el resto queda "Fuera de rango".
             </div>
           </div>
           <div>
@@ -3370,6 +3413,13 @@ function Calculadora({ onCalcDone, cotizacion }) {
                 esMasBarato={papelServicioId && row.sheet.label === labelMasBarato} />
             ))}
           </div>
+
+          {incompatiblesCount > 0 && (
+            <button onClick={() => setShowIncompatible(v => !v)}
+              style={{ background: "none", border: `1.5px dashed ${C.border}`, borderRadius: 8, padding: "7px 12px", fontSize: 11.5, color: C.muted, cursor: "pointer", width: "100%", marginBottom: 14 }}>
+              {showIncompatible ? "▲ Ocultar" : "▼ Mostrar"} {incompatiblesCount} medida{incompatiblesCount === 1 ? "" : "s"} fuera de rango de este impresor
+            </button>
+          )}
 
           <div style={{ background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "9px 13px", fontSize: 11.5, color: C.muted }}>
             💡 La imposición usa el Tamaño extendido si se captura, o el Tamaño final si no. La pinza y el refile se capturan arriba y se descuentan antes de acomodar las poses; las poses 🟧 van giradas 90°. Con un papel elegido, las medidas con precio de proveedor aparecen primero.
