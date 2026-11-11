@@ -294,17 +294,60 @@ function mapClickUpToCot(raw) {
 }
 
 // ─── Cálculo de imposición ───────────────────────────────────────────────────
-function calcImposition(sheetW, sheetH, pieceW, pieceH, margin = 0.5) {
-  const usableW = sheetW - margin * 2, usableH = sheetH - margin * 2;
-  const fitH = Math.floor(usableW / pieceW) * Math.floor(usableH / pieceH);
-  const fitV = Math.floor(usableW / pieceH) * Math.floor(usableH / pieceW);
-  const orientation = fitH >= fitV ? "horizontal" : "vertical";
-  const colsH = Math.floor(usableW / pieceW), rowsH = Math.floor(usableH / pieceH);
-  const colsV = Math.floor(usableW / pieceH), rowsV = Math.floor(usableH / pieceW);
+// Además de la rejilla pura (todas las poses iguales), prueba imposición MIXTA:
+// rejilla principal + poses giradas 90° en la tira sobrante (derecha o abajo).
+// En muchos formatos eso gana poses reales. margin = refile por lado (cm);
+// pinza = agarre de máquina (cm), se come un solo borde del pliego.
+function calcImposition(sheetW, sheetH, pieceW, pieceH, margin = 0.5, pinza = 0) {
+  const pz = parseFloat(pinza) || 0;
+  const usableW = sheetW - margin * 2;
+  const usableH = sheetH - margin * 2 - pz;
+  if (!(pieceW > 0 && pieceH > 0 && usableW >= Math.min(pieceW, pieceH) && usableH >= Math.min(pieceW, pieceH))) {
+    return { piecesPerSheet: 0, orientation: "horizontal", cols: 0, rows: 0, extras: 0, layout: [], utilizacion: 0, margin, pinza: pz };
+  }
+
+  // Una variante = rejilla de pw×ph + poses giradas en la tira sobrante elegida.
+  const variante = (pw, ph, dondeExtras) => {
+    const cols = Math.floor(usableW / pw), rows = Math.floor(usableH / ph);
+    const layout = [];
+    for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++)
+      layout.push({ x: c * pw, y: r * ph, w: pw, h: ph, girada: false });
+    let extras = 0;
+    if (cols > 0 && rows > 0) {
+      if (dondeExtras === "der") {
+        const sobraW = usableW - cols * pw;             // tira vertical a la derecha
+        const ec = Math.floor(sobraW / ph), er = Math.floor(usableH / pw);
+        for (let c = 0; c < ec; c++) for (let r = 0; r < er; r++)
+          layout.push({ x: cols * pw + c * ph, y: r * pw, w: ph, h: pw, girada: true });
+        extras = Math.max(0, ec * er);
+      } else {
+        const sobraH = usableH - rows * ph;             // tira horizontal abajo
+        const ec = Math.floor(usableW / ph), er = Math.floor(sobraH / pw);
+        for (let c = 0; c < ec; c++) for (let r = 0; r < er; r++)
+          layout.push({ x: c * ph, y: rows * ph + r * pw, w: ph, h: pw, girada: true });
+        extras = Math.max(0, ec * er);
+      }
+    }
+    return { total: cols * rows + extras, cols, rows, extras, layout };
+  };
+
+  const candidatas = [
+    { ...variante(pieceW, pieceH, "der"),   orientation: "horizontal" },
+    { ...variante(pieceW, pieceH, "abajo"), orientation: "horizontal" },
+    { ...variante(pieceH, pieceW, "der"),   orientation: "vertical" },
+    { ...variante(pieceH, pieceW, "abajo"), orientation: "vertical" },
+  ];
+  let best = candidatas[0];
+  candidatas.forEach(cand => { if (cand.total > best.total) best = cand; });
+
+  // % del pliego completo que termina siendo producto (el resto es refile/pinza/sobrante)
+  const utilizacion = sheetW * sheetH > 0
+    ? Math.round(((best.total * pieceW * pieceH) / (sheetW * sheetH)) * 1000) / 10 : 0;
+
   return {
-    piecesPerSheet: Math.max(fitH, fitV), orientation,
-    cols: orientation === "horizontal" ? colsH : colsV,
-    rows: orientation === "horizontal" ? rowsH : rowsV,
+    piecesPerSheet: best.total, orientation: best.orientation,
+    cols: best.cols, rows: best.rows, extras: best.extras,
+    layout: best.layout, utilizacion, margin, pinza: pz,
   };
 }
 
@@ -325,9 +368,30 @@ function filterSheetsByMachine(machine, extraSheets = []) {
 }
 
 // ─── Grid Preview ─────────────────────────────────────────────────────────────
-function GridPreview({ cols, rows, sheetW, sheetH }) {
-  const scale = Math.min(130 / sheetW, 80 / sheetH);
+// Dibuja el pliego a escala real: poses normales en azul, giradas en ámbar,
+// la pinza en rojo claro, y el sobrante queda del color del fondo — así el
+// desperdicio se VE, igual que en un software de imposición.
+function GridPreview({ cols, rows, sheetW, sheetH, result }) {
+  const scale = Math.min(150 / sheetW, 95 / sheetH);
   const sw = sheetW * scale, sh = sheetH * scale;
+  if (result && Array.isArray(result.layout) && result.layout.length) {
+    const m = (result.margin || 0) * scale;
+    const pinzaPx = (result.pinza || 0) * scale;
+    return (
+      <svg width={sw} height={sh} style={{ display: "block", border: `1.5px solid ${C.navy}`, borderRadius: 3, flexShrink: 0 }}>
+        <rect width={sw} height={sh} fill="#EAF4FB" />
+        {pinzaPx > 0.5 && (
+          <rect x={0} y={sh - pinzaPx} width={sw} height={pinzaPx} fill={C.coral} fillOpacity={0.22} />
+        )}
+        {result.layout.map((p, i) => (
+          <rect key={i} x={m + p.x * scale + 0.5} y={m + p.y * scale + 0.5}
+            width={Math.max(1, p.w * scale - 1)} height={Math.max(1, p.h * scale - 1)}
+            fill={p.girada ? C.amber : C.cyan} fillOpacity={p.girada ? 0.45 : 0.28}
+            stroke={p.girada ? C.amber : C.cyan} strokeWidth={0.8} rx={1} />
+        ))}
+      </svg>
+    );
+  }
   const pw = (sheetW / cols) * scale, ph = (sheetH / rows) * scale;
   return (
     <svg width={sw} height={sh} style={{ display: "block", border: `1.5px solid ${C.navy}`, borderRadius: 3, flexShrink: 0 }}>
@@ -403,17 +467,17 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
               <span style={{ background: C.green, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>💰 MÁS BARATO</span>
             )}
             <span style={{ background: isSelected ? C.cyan : badgeColor, color: "#fff", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
-              {score > 0 ? score + " pzas/pliego" : "No cabe"}
+              {score > 0 ? score + " pzas/pliego" + (result.extras > 0 ? " · " + result.extras + " giradas" : "") : "No cabe"}
             </span>
           </div>
         )}
       </div>
       {compatible && score > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-          <GridPreview cols={result.cols} rows={result.rows} sheetW={sheet.w} sheetH={sheet.h} />
+          <GridPreview cols={result.cols} rows={result.rows} sheetW={sheet.w} sheetH={sheet.h} result={result} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", flex: 1 }}>
-            <Stat label="Orientación" value={result.orientation === "horizontal" ? "\u2194 Horizontal" : "\u2195 Vertical"} />
-            <Stat label="Cols x Filas" value={result.cols + " x " + result.rows} />
+            <Stat label="Acomodo" value={result.cols + " × " + result.rows + (result.extras > 0 ? " + " + result.extras + " giradas" : "") + (result.orientation === "horizontal" ? " \u2194" : " \u2195")} />
+            <Stat label="Aprovechamiento" value={result.utilizacion != null ? result.utilizacion + "%" : "\u2014"} accent={result.utilizacion >= 75} bold />
             <Stat label="Pliegos netos" value={totalRaw?.toLocaleString("es-MX") ?? "\u2014"} />
             <Stat label="Merma +" value={mermaExtra > 0 ? "+" + mermaExtra : "0"} />
             <Stat label="Pliegos totales" value={totalConMerma?.toLocaleString("es-MX") ?? "\u2014"} bold />
@@ -2651,6 +2715,8 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [mermaAuto, setMermaAuto] = useState(true); // true = se calcula sola con la tabla de merma; false = la editaste a mano
   const [mermaModo, setMermaModo] = useState("pct"); // "pct" = porcentaje · "pliegos" = cantidad fija de pliegos
   const [mermaPliegos, setMermaPliegos] = useState(""); // solo aplica cuando mermaModo === "pliegos"
+  const [pinza, setPinza]   = useState("1");   // cm que se come la máquina en un borde del pliego
+  const [margen, setMargen] = useState("0.5"); // cm de refile por lado
   const [gramaje, setGramaje] = useState(() => {
     if (cotizacion?.papel_acabado_gramaje) {
       // Extrae todos los números del texto (ej: "Sbs 12\nsbs 10 puntos" → ["12","10"])
@@ -2879,7 +2945,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
 
     const raw = sheetsWithCompat.map(({ label, w, h, compatible }) => ({
       sheet: { label, w, h }, compatible,
-      result: calcImposition(w, h, impW, impH),
+      result: calcImposition(w, h, impW, impH, parseFloat(margen) || 0.5, parseFloat(pinza) || 0),
     })).sort((a, b) => {
       if (a.compatible !== b.compatible) return a.compatible ? -1 : 1;
       return b.result.piecesPerSheet - a.result.piecesPerSheet;
@@ -3033,6 +3099,18 @@ function Calculadora({ onCalcDone, cotizacion }) {
             <input value={gramaje} onChange={e => setGramaje(e.target.value)}
               style={inputStyle} type="number" step="1"
               placeholder={cotizacion?.papel_acabado_gramaje ? cotizacion.papel_acabado_gramaje.replace(/\n/g, " · ").trim() : "300"} />
+          </div>
+          <div>
+            <label style={labelStyle}>Pinza y refile <span style={{ color: C.muted, fontWeight: 400, textTransform: "none" }}>cm</span></label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input value={pinza} onChange={e => setPinza(e.target.value)} style={inputStyle}
+                type="number" step="0.5" min="0" title="Pinza: borde que agarra la máquina (un solo lado del pliego)" placeholder="Pinza" />
+              <input value={margen} onChange={e => setMargen(e.target.value)} style={inputStyle}
+                type="number" step="0.25" min="0" title="Refile por lado" placeholder="Refile" />
+            </div>
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
+              Pinza (un borde) · refile por lado. Se descuentan antes de acomodar poses.
+            </div>
           </div>
           <div>
             <label style={labelStyle}>Tipo de papel (para mandarle al papelero)</label>
@@ -3252,7 +3330,24 @@ function Calculadora({ onCalcDone, cotizacion }) {
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
-            {results.raw.map((row) => (
+            {/* Con un papel elegido, las medidas que SÍ tienen precio de proveedor van
+                primero — las "sin precio capturado" se van al final para no tapar
+                los costos reales con tarjetas vacías. */}
+            {(papelServicioId
+              ? [...results.raw].sort((a, b) => {
+                  if (a.compatible !== b.compatible) return a.compatible ? -1 : 1;
+                  const precioDe = (row) => {
+                    if (!(row.result.piecesPerSheet > 0)) return false;
+                    const neto = Math.ceil(results.qty / row.result.piecesPerSheet);
+                    const tot = totalConMermaDe(neto, results.merma, results.mermaPliegosFijos);
+                    return tot != null && !!mejorPrecioPliego(row.sheet.w, row.sheet.h, tot);
+                  };
+                  const pa = precioDe(a) ? 1 : 0, pb = precioDe(b) ? 1 : 0;
+                  if (pa !== pb) return pb - pa;
+                  return b.result.piecesPerSheet - a.result.piecesPerSheet;
+                })
+              : results.raw
+            ).map((row) => (
               <SheetResult key={row.sheet.label} sheet={row.sheet} result={row.result}
                 qty={results.qty} mermaPercent={results.merma} mermaPliegosFijos={results.mermaPliegosFijos}
                 pricePerKg={results.pricePerKg} gramaje={results.gramaje}
@@ -3277,7 +3372,7 @@ function Calculadora({ onCalcDone, cotizacion }) {
           </div>
 
           <div style={{ background: "#FFF7F5", border: `1.5px solid ${C.coral}`, borderRadius: 8, padding: "9px 13px", fontSize: 11.5, color: C.muted }}>
-            💡 La imposición usa el Tamaño extendido si se captura, o el Tamaño final si no. Margen de Pinza + Rebase: 0.5 cm por lado. Mayor rendimiento aparece primero.
+            💡 La imposición usa el Tamaño extendido si se captura, o el Tamaño final si no. La pinza y el refile se capturan arriba y se descuentan antes de acomodar las poses; las poses 🟧 van giradas 90°. Con un papel elegido, las medidas con precio de proveedor aparecen primero.
           </div>
         </>
       )}
