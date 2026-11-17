@@ -4865,6 +4865,12 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
   const [precios, setPrecios] = useState({});
   const [procesosActivos, setProcesosActivos] = useState([]);
   const [guardando, setGuardando] = useState(false);
+  // Para no aventar el catálogo completo (90+ chips): por default solo se
+  // muestran los servicios que ESTE proveedor ya ha cotizado (su historial en
+  // tarifas); el resto queda tras el buscador o el botón "ver todo".
+  const [servsProv, setServsProv] = useState(null); // null = cargando
+  const [busqueda, setBusqueda] = useState("");
+  const [verTodo, setVerTodo] = useState(false);
 
   useEffect(() => {
     loadServiciosCatalogo().then(cat => {
@@ -4872,6 +4878,19 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
       setLoadingCat(false);
     });
   }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const provs = await loadProveedoresDB();
+        const p = provs.find(x => x.nombre === sol.proveedor);
+        if (!p) { setServsProv([]); return; }
+        const { data, error } = await supabase.from("tarifas").select("servicio_id").eq("proveedor_id", p.id);
+        if (error) { console.error(error); setServsProv([]); return; }
+        setServsProv([...new Set((data || []).map(t => t.servicio_id))]);
+      } catch { setServsProv([]); }
+    })();
+  }, [sol.proveedor]);
 
   const toggleProceso = (id) =>
     setProcesosActivos(prev => prev.includes(id) ? prev.filter(k => k !== id) : [...prev, id]);
@@ -4911,17 +4930,54 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
         <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Cargando catálogo…</div>
       ) : (
         <>
-          {/* Selector de servicios */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12 }}>
-            {catalogo.map(s => (
-              <button key={s.id} onClick={() => toggleProceso(s.id)} style={{
-                background: procesosActivos.includes(s.id) ? colorForCategoria(categorias, s.categoria) : C.bg,
-                color: procesosActivos.includes(s.id) ? "#fff" : C.muted,
-                border: `1.5px solid ${procesosActivos.includes(s.id) ? colorForCategoria(categorias, s.categoria) : C.border}`,
-                borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
-              }}>{s.nombre}</button>
-            ))}
-          </div>
+          {/* Selector de servicios: primero los del proveedor, el resto tras buscar o "ver todo" */}
+          {(() => {
+            const norm = (t) => (t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+            const delProv = servsProv === null ? [] : servsProv;
+            let visibles;
+            if (busqueda.trim()) {
+              const q = norm(busqueda);
+              visibles = catalogo.filter(s => norm(s.nombre).includes(q) || norm(s.categoria).includes(q));
+            } else if (verTodo || (servsProv !== null && delProv.length === 0)) {
+              visibles = catalogo;
+            } else {
+              visibles = catalogo.filter(s => delProv.includes(s.id) || procesosActivos.includes(s.id));
+            }
+            const numProv = catalogo.filter(s2 => delProv.includes(s2.id) || procesosActivos.includes(s2.id)).length;
+            const ocultos = catalogo.length - numProv;
+            return (
+              <>
+                <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
+                  placeholder={"🔍 Buscar servicio en todo el catálogo…"}
+                  style={{ ...inputStyle, marginBottom: 8 }} />
+                {servsProv === null && <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Cargando servicios del proveedor…</div>}
+                {!busqueda.trim() && servsProv !== null && delProv.length > 0 && !verTodo && (
+                  <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 6 }}>
+                    ⭐ Servicios que {sol.proveedor} te ha cotizado antes — los demás con el buscador o "ver todo":
+                  </div>
+                )}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+                  {visibles.map(s => (
+                    <button key={s.id} onClick={() => toggleProceso(s.id)} style={{
+                      background: procesosActivos.includes(s.id) ? colorForCategoria(categorias, s.categoria) : C.bg,
+                      color: procesosActivos.includes(s.id) ? "#fff" : C.muted,
+                      border: `1.5px solid ${procesosActivos.includes(s.id) ? colorForCategoria(categorias, s.categoria) : C.border}`,
+                      borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    }}>{s.nombre}</button>
+                  ))}
+                  {visibles.length === 0 && (
+                    <span style={{ fontSize: 11, color: C.muted }}>Sin coincidencias — revisa la búsqueda.</span>
+                  )}
+                </div>
+                {!busqueda.trim() && servsProv !== null && delProv.length > 0 && ocultos > 0 && (
+                  <button onClick={() => setVerTodo(v => !v)} style={{
+                    background: "none", border: `1.5px dashed ${C.border}`, borderRadius: 20,
+                    padding: "3px 12px", fontSize: 11, color: C.muted, cursor: "pointer", marginBottom: 10,
+                  }}>{verTodo ? "▲ Ver menos" : `▼ Ver todo el catálogo (${ocultos} más)`}</button>
+                )}
+              </>
+            );
+          })()}
 
           {/* Captura de precios */}
           {procesosActivos.length > 0 && (
