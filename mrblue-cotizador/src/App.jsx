@@ -209,6 +209,38 @@ async function guardarPliegosEnSupabase(supabaseId, calcData) {
   if (error) console.error("No se pudieron guardar los pliegos:", error);
 }
 
+// ─── Sincronizar lo capturado hacia la tarea de ClickUp ──────────────────────
+// Al guardar una cotización, los montos viajan solos a la tarea de ClickUp
+// (vía /api/clickup-sync, que resuelve los campos por nombre) — así ya no se
+// captura doble. Es "fire and forget": si falla, la cotización ya quedó
+// guardada en Supabase y solo se avisa en consola.
+async function sincronizarCotizacionAClickUp(cot, { costoTotal, precioVenta, precioUnitario, desglose, confirmado }) {
+  const taskId = cot?.task_id || cot?._clickup_task_id;
+  if (!taskId) return { saltado: true };
+  const fmt = (v) => "$" + (v || 0).toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const r2 = (v) => Math.round(v * 100) / 100;
+  const campos = {};
+  if (costoTotal > 0) campos["$$ Cotizacion Mr Blue"] = r2(costoTotal);
+  if (precioVenta > 0) campos["$$ Precio de Venta"] = r2(precioVenta);
+  if (precioUnitario > 0) campos["Precio Unitario"] = Math.round(precioUnitario * 10000) / 10000;
+  // Cada línea del desglose intenta caer en su campo "$ <Proceso>" si la lista lo tiene
+  (desglose || []).forEach(d => { if (d && d.label && d.v > 0) campos["$ " + d.label] = r2(d.v); });
+  try {
+    const r = await fetch("/api/clickup-sync", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task_id: taskId, campos,
+        comentario: (confirmado ? "✅ Pedido confirmado en el Cotizador Mr. Blue: " : "💾 Cotizado en el Cotizador Mr. Blue: ")
+          + "costo " + fmt(costoTotal) + " · venta " + fmt(precioVenta)
+          + (precioUnitario > 0 ? " · unitario " + fmt(precioUnitario) : ""),
+      }),
+    });
+    const data = await r.json().catch(() => null);
+    if (data && (data.errores || []).length) console.warn("clickup-sync:", data.errores);
+    return data || {};
+  } catch (e) { console.warn("clickup-sync:", e); return { error: String(e) }; }
+}
+
 // ─── Traer la solicitud desde Supabase usando el cot_id de la URL ────────────
 async function fetchCotFromSupabase(cotId) {
   const { data, error } = await supabase
@@ -4659,6 +4691,11 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
           historialPreciosDe(cotId).then(setHistorialFolio);
           setGuardadoPrecio(true);
           setTimeout(() => setGuardadoPrecio(false), 2000);
+          // Los montos viajan solos a la tarea de ClickUp (sin bloquear el guardado)
+          sincronizarCotizacionAClickUp(cotizacion, {
+            costoTotal, precioVenta, precioUnitario,
+            desglose: desgloseArr, confirmado: false,
+          });
         }} disabled={costoTotal <= 0} style={{ ...btn(costoTotal > 0 ? (guardadoPrecio ? C.green : C.navy) : C.muted, true), flex: 1 }}>
           {guardadoPrecio ? "✓ Guardado" : "💾 Guardar cotización"}
         </button>
@@ -4812,6 +4849,11 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
             historialPreciosDe(id).then(setHistorialFolio);
             setGuardadoCronograma(true);
             setTimeout(() => setGuardadoCronograma(false), 2000);
+            // El pedido confirmado también viaja solo a la tarea de ClickUp
+            sincronizarCotizacionAClickUp(cotizacion, {
+              costoTotal, precioVenta, precioUnitario,
+              desglose: desgloseArr, confirmado: true,
+            });
           }} style={{ ...btn(guardadoCronograma ? C.green : C.navy, true), marginTop: 6, width: "100%" }}>
             {guardadoCronograma ? "✓ Pedido confirmado en el cronograma" : "✅ Ya es pedido — agregar al cronograma"}
           </button>
@@ -4857,7 +4899,110 @@ function tiempoRespuesta(fechaEnvio, respondidoAt) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // MÓDULO: Seguimiento
 // ═══════════════════════════════════════════════════════════════════════════════
-function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
+// ─── Respuestas de proveedores recibidas por correo ──────────────────────────
+// aloha@mrblue.ink y hola@lelab.ink reenvían a un mailhook de Make, que deja
+// cada correo en la tabla respuestas_correo. Aquí se leen para prender el
+// badge 📬 en Seguimiento y pre-llenar los montos al registrar la respuesta.
+function extraerEmail(texto) {
+  const m = String(texto || "").match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/);
+  return m ? m[0].toLowerCase() : "";
+}
+function decodeB64Utf8(b64) {
+  try { return decodeURIComponent(escape(atob(b64 || ""))); }
+  catch { try { return atob(b64 || ""); } catch { return ""; } }
+}
+function htmlAPlano(t) {
+  return String(t || "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|tr|li|h\d)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&")
+    .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+function cuerpoDeRespuesta(r) {
+  const raw = decodeB64Utf8(r.cuerpo_b64);
+  return /<\w+[^>]*>/.test(raw) ? htmlAPlano(raw) : raw;
+}
+async function loadRespuestasCorreo() {
+  try {
+    const { data, error } = await supabase.from("respuestas_correo")
+      .select("id, remitente, para, asunto, cuerpo_b64, fecha, procesado")
+      .order("fecha", { ascending: false }).limit(300);
+    if (error) { console.error("respuestas_correo:", error); return []; }
+    return data || [];
+  } catch { return []; }
+}
+// Respuestas que corresponden a una solicitud: mismo remitente que el correo
+// del proveedor y llegadas DESPUÉS de habérsela enviado (con 1 h de gracia).
+function respuestasDeSolicitud(respuestas, sol) {
+  const mail = extraerEmail(sol.email);
+  if (!mail) return [];
+  return (respuestas || []).filter(r =>
+    extraerEmail(r.remitente) === mail &&
+    (!sol.fechaEnvio || new Date(r.fecha) >= new Date(new Date(sol.fechaEnvio) - 3600000)));
+}
+// Heurística de montos: por línea del correo, si menciona un servicio y trae
+// un monto, se propone ese precio. Siempre queda editable antes de guardar.
+function extraerPreciosDeCorreo(texto, servicios) {
+  const norm = (t) => (t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const props = {};
+  const lineas = String(texto || "").split(/\n+/);
+  servicios.forEach(s => {
+    const palabras = norm(s.nombre).split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+    if (!palabras.length) return;
+    for (const ln of lineas) {
+      const nl = norm(ln);
+      if (!palabras.some(w => nl.includes(w))) continue;
+      const m = ln.match(/\$\s*([\d]{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)/)
+        || ln.match(/([\d]{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{2})\s*(?:mxn|pesos)?\s*$/i);
+      if (m) { const v = parseFloat(m[1].replace(/,/g, "")); if (v > 0) { props[s.id] = String(v); break; } }
+    }
+  });
+  return props;
+}
+
+// ¿Qué servicios del catálogo se pidieron en esta cotización? Diccionario
+// campo→término de búsqueda en el catálogo. Si un término no cruza con ningún
+// servicio, simplemente no se pre-activa (y se agrega aquí el término correcto).
+function serviciosPedidosEnCot(cot, catalogo) {
+  const norm = (t) => (t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const exacto = (nombre) => catalogo.find(s => norm(s.nombre) === norm(nombre));
+  const contiene = (...terminos) => catalogo.find(s => terminos.some(t => norm(s.nombre).includes(norm(t))));
+  const ids = [];
+  const marca = (hit) => { if (hit && !ids.includes(hit.id)) ids.push(hit.id); };
+  const ac = cot.acabados || {};
+
+  marca(exacto("Impresión") || contiene("impresion offset"));
+  if (ac.suaje)       marca(contiene("suajado", "suaje", "troquel"));
+  if (ac.corte)       marca(exacto("Corte") || contiene("corte"));
+  if (ac.doblez)      marca(contiene("doblez", "doblado"));
+  if (ac.plecado)     marca(contiene("plecado"));
+  if (ac.serigrafia)  marca(contiene("serigraf"));
+  if (ac.hotmelt)     marca(contiene("hotmelt"));
+  if (ac.rustica)     marca(contiene("rustic", "cosido", "encuadernacion tradicional"));
+  if (ac.wireo)       marca(contiene("wire"));
+  if (ac.engrapado)   marca(contiene("engrapad"));
+  if (ac.ensobretado) marca(contiene("maquila de sobre"));
+  if (ac.hotstamping) marca(contiene("hotstamping", "foil"));
+  if (ac.empaque_esp) marca(contiene("empaque"));
+  if (ac.pasta_dura)  marca(contiene("pasta dura"));
+  if (cot.laminado) {
+    const tipo = norm(cot.tipo_laminado || "");
+    marca((tipo && contiene("laminado " + tipo)) || contiene("laminado"));
+  }
+  if (cot.barniz_uv) {
+    const tipo = norm(cot.tipo_barniz || "");
+    marca(
+      (tipo.includes("plasta") && contiene("barniz uv plasta")) ||
+      (tipo.includes("registro") && contiene("barniz uv registro")) ||
+      (tipo.includes("maquina") && contiene("barniz maquina")) ||
+      contiene("barniz")
+    );
+  }
+  if (cot.lleva_pantone) marca(contiene("tintas especiales"));
+  return ids;
+}
+
+function RegistrarRespuesta({ sol, onGuardar, onCancelar, respuestas = [] }) {
   // Panel para capturar precios que mandó el proveedor al responder.
   // El catálogo de servicios se lee de Supabase, igual que en FichaPrecios.
   const [catalogo, setCatalogo] = useState([]);
@@ -4871,6 +5016,7 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
   const [servsProv, setServsProv] = useState(null); // null = cargando
   const [busqueda, setBusqueda] = useState("");
   const [verTodo, setVerTodo] = useState(false);
+  const [correoAbierto, setCorreoAbierto] = useState(false);
 
   useEffect(() => {
     loadServiciosCatalogo().then(cat => {
@@ -4892,6 +5038,22 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
     })();
   }, [sol.proveedor]);
 
+  // Pre-activa los chips según lo que se PIDIÓ en la solicitud original:
+  // lee la cotización por cot_id y marca los servicios que trae (suaje,
+  // laminado, barniz…). Solo quedan por teclear los precios.
+  useEffect(() => {
+    if (!sol.cot_id || loadingCat || catalogo.length === 0) return;
+    (async () => {
+      try {
+        const raw = await fetchCotFromSupabase(sol.cot_id);
+        if (!raw) return;
+        const pedidos = serviciosPedidosEnCot(mapClickUpToCot(raw), catalogo);
+        if (pedidos.length) setProcesosActivos(prev => [...new Set([...prev, ...pedidos])]);
+      } catch (e) { console.warn("pre-activar chips:", e); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sol.cot_id, loadingCat]);
+
   const toggleProceso = (id) =>
     setProcesosActivos(prev => prev.includes(id) ? prev.filter(k => k !== id) : [...prev, id]);
 
@@ -4911,6 +5073,11 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
         }
       }
     }
+    // Los correos usados quedan marcados como procesados (apaga el badge 📬)
+    try {
+      const idsR = respuestasDeSolicitud(respuestas, sol).map(r => r.id);
+      if (idsR.length) await supabase.from("respuestas_correo").update({ procesado: true }).in("id", idsR);
+    } catch {}
     onGuardar();
     setGuardando(false);
   };
@@ -4925,6 +5092,44 @@ function RegistrarRespuesta({ sol, onGuardar, onCancelar }) {
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 12 }}>
         Activa los servicios que cotizaron y captura el precio. Estos datos se guardarán en su ficha histórica.
       </div>
+
+      {/* 📬 Correo(s) que este proveedor mandó de regreso, con prellenado de montos */}
+      {(() => {
+        const correos = respuestasDeSolicitud(respuestas, sol);
+        if (!correos.length) return null;
+        return (
+          <div style={{ background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8, padding: 10, marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.navy }}>
+                📬 Respondió por correo · {new Date(correos[0].fecha).toLocaleString("es-MX")}
+                {correos.length > 1 ? ` · ${correos.length} correos` : ""}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => setCorreoAbierto(v => !v)}
+                  style={{ ...btn(C.muted), background: "none", color: C.muted, border: `1.5px solid ${C.border}`, fontSize: 11 }}>
+                  {correoAbierto ? "Ocultar correo" : "Ver correo"}
+                </button>
+                <button onClick={() => {
+                  const texto = cuerpoDeRespuesta(correos[0]);
+                  const activos = catalogo.filter(s => procesosActivos.includes(s.id));
+                  const props = extraerPreciosDeCorreo(texto, activos.length ? activos : catalogo);
+                  const ids = Object.keys(props);
+                  if (!ids.length) { setCorreoAbierto(true); return; }
+                  setProcesosActivos(prev => [...new Set([...prev, ...ids])]);
+                  setPrecios(prev => ({ ...props, ...prev }));
+                }} style={{ ...btn(C.cyan), fontSize: 11 }}>⚡ Usar montos del correo</button>
+              </div>
+            </div>
+            {correoAbierto && (
+              <pre style={{ whiteSpace: "pre-wrap", fontSize: 11.5, color: C.text, background: "#fff",
+                border: `1px solid ${C.border}`, borderRadius: 6, padding: 10, marginTop: 8,
+                maxHeight: 260, overflow: "auto", fontFamily: "inherit" }}>
+                <b>{correos[0].asunto}</b>{"\n\n"}{cuerpoDeRespuesta(correos[0])}
+              </pre>
+            )}
+          </div>
+        );
+      })()}
 
       {loadingCat ? (
         <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>Cargando catálogo…</div>
@@ -5416,9 +5621,11 @@ function Seguimiento({ cotIdFiltro = null, compacto = false }) {
   const [recordatorioTexto, setRecordatorioTexto] = useState("");
   const [loadingRec, setLoadingRec] = useState(false);
   const [registrandoRespuesta, setRegistrandoRespuesta] = useState(null); // sol.id
+  const [respuestasCorreo, setRespuestasCorreo] = useState([]);
 
   useEffect(() => {
     storageGet("solicitudes").then(d => { setSolicitudes(d || []); setLoading(false); });
+    loadRespuestasCorreo().then(setRespuestasCorreo);
   }, []);
 
   const guardar = async (list) => { setSolicitudes(list); await storageSet("solicitudes", list); };
@@ -5499,7 +5706,13 @@ function Seguimiento({ cotIdFiltro = null, compacto = false }) {
                     </div>
                   )}
                 </div>
-                <StatusBadge status={st} />
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  {st !== "respondido" && respuestasDeSolicitud(respuestasCorreo, sol).some(r => !r.procesado) && (
+                    <span style={{ background: "#EAF4FB", color: C.navy, border: `1.5px solid ${C.cyan}`,
+                      borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>📬 Respuesta recibida</span>
+                  )}
+                  <StatusBadge status={st} />
+                </div>
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                 {st !== "respondido" && <>
@@ -5520,6 +5733,7 @@ function Seguimiento({ cotIdFiltro = null, compacto = false }) {
               {registrandoRespuesta === sol.id && (
                 <RegistrarRespuesta
                   sol={sol}
+                  respuestas={respuestasCorreo}
                   onGuardar={() => marcarRespondido(sol.id)}
                   onCancelar={() => setRegistrandoRespuesta(null)}
                 />
