@@ -209,6 +209,52 @@ async function guardarPliegosEnSupabase(supabaseId, calcData) {
   if (error) console.error("No se pudieron guardar los pliegos:", error);
 }
 
+// ─── Formaciones recordadas por producto ─────────────────────────────────────
+// Cuando un producto se repite, la formación buena ya existe (normalmente la
+// fija el suaje). Al guardar una cotización se recuerda su formación —
+// pliego y piezas por pliego — bajo el nombre del producto, para ofrecerla
+// la próxima vez en 📐 Pliegos con un clic.
+function claveProducto(nombre) {
+  return String(nombre || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/\b(pedido|orden|o\.?\s?m\.?)\s*#?\s*[\d.]+/g, " ")
+    .replace(/\b(factura|fact|rem|remision|entrega)\s*#?\s*\d+/g, " ")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+}
+// Busca la formación del producto: primero por nombre exacto normalizado y, si
+// no, por parecido (mismas palabras aunque traiga o no el código o "(Comp)").
+function buscarFormacion(todas, nombre) {
+  const clave = claveProducto(nombre);
+  if (!clave || !todas) return null;
+  if (todas[clave]) return todas[clave];
+  const ruido = new Set(["comp", "compra", "de", "del", "la", "el", "y", "con", "v1", "v2"]);
+  const palabras = (t) => new Set(t.split(" ").filter(w => w.length > 1 && !ruido.has(w)));
+  const a = palabras(clave);
+  if (a.size < 2) return null;
+  let mejor = null, mejorScore = 0;
+  for (const [k, v] of Object.entries(todas)) {
+    const b = palabras(k);
+    const comun = [...a].filter(w => b.has(w)).length;
+    const score = comun / Math.min(a.size, b.size);   // 1 = una contiene a la otra
+    if (comun >= 2 && score > mejorScore) { mejor = v; mejorScore = score; }
+  }
+  return mejorScore >= 0.75 ? mejor : null;
+}
+async function guardarFormacion(cot, calcData) {
+  const clave = claveProducto(cot?.nombre_proyecto);
+  const sel = calcData?.selectedSheet;
+  if (!clave || !sel?.piecesPerSheet) return;
+  const todas = (await storageGet("formaciones")) || {};
+  todas[clave] = {
+    producto: cot.nombre_proyecto,
+    pliego: sel.label, w: sel.w, h: sel.h,
+    poses: sel.piecesPerSheet, manual: !!sel.manual,
+    extendido: calcData.extW && calcData.extH ? `${calcData.extW}×${calcData.extH}` : null,
+    papel: calcData.papelNombre || null,
+    fecha: new Date().toISOString(),
+  };
+  await storageSet("formaciones", todas);
+}
+
 // ─── Sincronizar lo capturado hacia la tarea de ClickUp ──────────────────────
 // Al guardar una cotización, los montos viajan solos a la tarea de ClickUp
 // (vía /api/clickup-sync, que resuelve los campos por nombre) — así ya no se
@@ -529,7 +575,7 @@ function SheetResult({ sheet, result, qty, mermaPercent, mermaPliegosFijos, pric
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
           <GridPreview cols={result.cols} rows={result.rows} sheetW={sheet.w} sheetH={sheet.h} result={result} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", flex: 1 }}>
-            <Stat label="Acomodo" value={result.cols + " × " + result.rows + (result.extras > 0 ? " + " + result.extras + " giradas" : "") + (result.orientation === "horizontal" ? " \u2194" : " \u2195")} />
+            <Stat label="Acomodo" value={result.manual ? "✋ " + result.piecesPerSheet + " fijas" : result.cols + " × " + result.rows + (result.extras > 0 ? " + " + result.extras + " giradas" : "") + (result.orientation === "horizontal" ? " \u2194" : " \u2195")} />
             <Stat label="Aprovechamiento" value={result.utilizacion != null ? result.utilizacion + "%" : "\u2014"} accent={result.utilizacion >= 75} bold />
             <Stat label="Pliegos netos" value={totalRaw?.toLocaleString("es-MX") ?? "\u2014"} />
             <Stat label="Merma +" value={mermaExtra > 0 ? "+" + mermaExtra : "0"} />
@@ -2781,6 +2827,45 @@ function Calculadora({ onCalcDone, cotizacion }) {
   const [mermaModo, setMermaModo] = useState("pct"); // "pct" = porcentaje · "pliegos" = cantidad fija de pliegos
   const [mermaPliegos, setMermaPliegos] = useState(""); // solo aplica cuando mermaModo === "pliegos"
   const [pinza, setPinza]   = useState("1");   // cm que se come la máquina en un borde del pliego
+  // Piezas por pliego fijas (las que ya dicta el suaje). Vacío = automático.
+  const [posesFijas, setPosesFijas] = useState("");
+  const [pliegoFijo, setPliegoFijo] = useState(null);       // medida a preseleccionar al calcular
+  const [formacionPrevia, setFormacionPrevia] = useState(null);
+  const [recalcPendiente, setRecalcPendiente] = useState(false);
+  useEffect(() => {
+    const clave = claveProducto(cotizacion?.nombre_proyecto);
+    if (!clave) return;
+    (async () => {
+      const t = (await storageGet("formaciones")) || {};
+      let previa = buscarFormacion(t, cotizacion?.nombre_proyecto);
+      if (!previa) {
+        // Respaldo: cotizaciones anteriores ya guardadas con su pliego.
+        // Piezas/pliego = ceil(cantidad / pliegos de producción).
+        try {
+          const { data } = await supabase.from("solicitudes_cotizador")
+            .select("id, nombre_proyecto, cantidad, pliegos_produccion, medida_pliego, updated_at")
+            .not("medida_pliego", "is", null).gt("pliegos_produccion", 0)
+            .order("updated_at", { ascending: false }).limit(400);
+          const hist = {};
+          (data || []).forEach(r => {
+            if (r.id === cotizacion?._supabase_id) return;
+            const k = claveProducto(r.nombre_proyecto);
+            const qty = parseInt(String(r.cantidad || "").replace(/[^\d]/g, "")) || 0;
+            if (!k || hist[k] || !qty) return;
+            const m = String(r.medida_pliego).match(/([\d.]+)\s*[x×]\s*([\d.]+)/i);
+            hist[k] = {
+              producto: r.nombre_proyecto, pliego: r.medida_pliego,
+              w: m ? parseFloat(m[1]) : null, h: m ? parseFloat(m[2]) : null,
+              poses: Math.ceil(qty / r.pliegos_produccion), manual: false,
+              extendido: null, papel: null, fecha: r.updated_at,
+            };
+          });
+          previa = buscarFormacion(hist, cotizacion?.nombre_proyecto);
+        } catch (e) { console.warn("formación previa:", e); }
+      }
+      setFormacionPrevia(previa);
+    })();
+  }, [cotizacion?.nombre_proyecto]);
   const [margen, setMargen] = useState("0.5"); // cm de refile por lado
   const [gramaje, setGramaje] = useState(() => {
     if (cotizacion?.papel_acabado_gramaje) {
@@ -3009,17 +3094,27 @@ function Calculadora({ onCalcDone, cotizacion }) {
     const medidasProveedor = opcionesPapel.map(o => ({ label: `${o.w}×${o.h} cm`, w: o.w, h: o.h }));
     const sheetsWithCompat = filterSheetsByMachine(null, medidasProveedor);
 
-    const raw = sheetsWithCompat.map(({ label, w, h, compatible }) => ({
-      sheet: { label, w, h }, compatible,
-      result: calcImposition(w, h, impW, impH, parseFloat(margen) || 0.5, parseFloat(pinza) || 0),
-    })).sort((a, b) => {
+    const fijas = parseInt(posesFijas) > 0 ? parseInt(posesFijas) : null;
+    const raw = sheetsWithCompat.map(({ label, w, h, compatible }) => {
+      let result = calcImposition(w, h, impW, impH, parseFloat(margen) || 0.5, parseFloat(pinza) || 0);
+      // Piezas por pliego fijas: mandan sobre el cálculo automático en todo
+      // (pliegos, merma, papel). Solo se respetan donde la pieza sí cabe.
+      if (fijas && result.piecesPerSheet > 0) {
+        result = {
+          ...result, piecesPerSheet: fijas, manual: true,
+          utilizacion: Math.round(((fijas * impW * impH) / (w * h)) * 1000) / 10,
+        };
+      }
+      return { sheet: { label, w, h }, compatible, result };
+    }).sort((a, b) => {
       if (a.compatible !== b.compatible) return a.compatible ? -1 : 1;
       return b.result.piecesPerSheet - a.result.piecesPerSheet;
     });
 
     // Auto-select the best compatible sheet (se necesita antes: la tabla de merma se
     // consulta con PLIEGOS, no con piezas — "300001-en adelante" etc. es "hojas de impresión")
-    const autoSelect = raw.find(r => r.compatible !== false && r.result.piecesPerSheet > 0);
+    const autoSelect = (pliegoFijo && raw.find(r => r.sheet.label === pliegoFijo && r.result.piecesPerSheet > 0))
+      || raw.find(r => r.compatible !== false && r.result.piecesPerSheet > 0);
     const pliegosNetosEst = autoSelect?.result.piecesPerSheet > 0 ? Math.ceil(qty_ / autoSelect.result.piecesPerSheet) : qty_;
 
     let merma_ = parseFloat(merma) || 0;
@@ -3042,6 +3137,12 @@ function Calculadora({ onCalcDone, cotizacion }) {
     const autoLabel = autoSelect?.sheet.label ?? null;
     setSelectedSheetLabel(autoLabel);
   };
+
+  // Al elegir "Usar esta formación" se calcula de una vez con ella.
+  useEffect(() => {
+    if (recalcPendiente) { setRecalcPendiente(false); calcular(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recalcPendiente]);
 
   const compatibles = results?.raw.filter(r => r.compatible) ?? [];
   const autoB = compatibles[0] ?? results?.raw[0];
@@ -3339,6 +3440,40 @@ function Calculadora({ onCalcDone, cotizacion }) {
               )}
             </>
           )}
+        </div>
+
+        {formacionPrevia && !posesFijas && (
+          <div style={{ marginTop: 14, background: "#EAF4FB", border: `1.5px solid ${C.cyan}`, borderRadius: 8,
+            padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12, color: C.navy }}>
+              🔁 <b>Ya cotizaste este producto.</b> La última vez: <b>{formacionPrevia.pliego}</b> · <b>{formacionPrevia.poses} pzas/pliego</b>
+              {formacionPrevia.extendido ? ` · extendido ${formacionPrevia.extendido}` : ""}
+              {formacionPrevia.papel ? ` · ${formacionPrevia.papel}` : ""}
+              <span style={{ color: C.muted }}> ({new Date(formacionPrevia.fecha).toLocaleDateString("es-MX")})</span>
+            </div>
+            <button onClick={() => {
+              setPosesFijas(String(formacionPrevia.poses));
+              setPliegoFijo(formacionPrevia.pliego);
+              setRecalcPendiente(true);
+            }} style={{ ...btn(C.cyan), fontSize: 11.5 }}>Usar esta formación</button>
+          </div>
+        )}
+
+        <div style={{ marginTop: 14 }}>
+          <label style={labelStyle}>✋ Piezas por pliego (fijo) <span style={{ color: C.muted, fontWeight: 400, textTransform: "none" }}>opcional</span></label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input value={posesFijas} onChange={e => { setPosesFijas(e.target.value); if (!e.target.value) setPliegoFijo(null); }}
+              style={{ ...inputStyle, maxWidth: 160 }} type="number" min="1" step="1" placeholder="Automático" />
+            {posesFijas && (
+              <button onClick={() => { setPosesFijas(""); setPliegoFijo(null); }}
+                style={{ background: "none", border: "none", color: C.muted, fontSize: 11, cursor: "pointer", textDecoration: "underline" }}>
+                volver a automático
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
+            Úsalo cuando el suaje o la formación ya dicen cuántas piezas caben. Vacío = el cotizador lo calcula.
+          </div>
         </div>
 
         <button onClick={calcular} style={{ ...btn(C.cyan, true), marginTop: 16 }}>
@@ -4696,6 +4831,8 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
             costoTotal, precioVenta, precioUnitario,
             desglose: desgloseArr, confirmado: false,
           });
+          // Recuerda la formación (pliego + piezas/pliego) para la próxima vez
+          guardarFormacion(cotizacion, calcData);
         }} disabled={costoTotal <= 0} style={{ ...btn(costoTotal > 0 ? (guardadoPrecio ? C.green : C.navy) : C.muted, true), flex: 1 }}>
           {guardadoPrecio ? "✓ Guardado" : "💾 Guardar cotización"}
         </button>
@@ -4854,6 +4991,7 @@ function Cotizador({ cotizacion, calcData, onTiempoEstimado, onProveedoresUsados
               costoTotal, precioVenta, precioUnitario,
               desglose: desgloseArr, confirmado: true,
             });
+            guardarFormacion(cotizacion, calcData);
           }} style={{ ...btn(guardadoCronograma ? C.green : C.navy, true), marginTop: 6, width: "100%" }}>
             {guardadoCronograma ? "✓ Pedido confirmado en el cronograma" : "✅ Ya es pedido — agregar al cronograma"}
           </button>
